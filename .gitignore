@@ -1,0 +1,17 @@
+.bashrc
+.cache
+.copilot
+.gitconfig
+.gnupg
+.omo
+.vscode
+*.pyc
+__pycache__
+build/
+install/
+log/
+third_party/
+.devcontainer/.onCreateCommandMarker
+.devcontainer/.postCreateCommandMarker
+.devcontainer/.updateContentCommandMarker
+.devcontainer/devcontainer-lock.json

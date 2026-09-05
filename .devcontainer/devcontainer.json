@@ -1,0 +1,14 @@
+{
+	"name": "ROS2 Humble",
+	"build": {
+		"dockerfile": "../docker/Dockerfile"
+	},
+	"runArgs": [
+		"--network=host",
+		"--privileged",
+		"--device=/dev"
+	],
+	"workspaceFolder": "/workspace",
+	"workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+	"postCreateCommand": "bash -c 'echo \"source /opt/ros/humble/setup.bash\" >> ~/.bashrc && echo \"source /opt/orbbec_ws/install/setup.bash\" >> ~/.bashrc && echo \"source /opt/fairy_ws/install/setup.bash\" >> ~/.bashrc'"
+}

@@ -1,0 +1,20 @@
+services:
+  perception_tower:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: perception_tower:humble
+    container_name: perception_tower
+    network_mode: host
+    privileged: true
+    environment:
+      - HOME=/workspace
+      - DISPLAY=${DISPLAY:-:0}
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+    volumes:
+      - /mnt/d/work/perception-tower:/workspace
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /dev:/dev
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
