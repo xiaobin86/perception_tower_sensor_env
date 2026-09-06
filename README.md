@@ -35,6 +35,25 @@ ros2 topic hz /fairy/points
 ros2 topic hz /camera/color/image_raw
 ```
 
+### 4. 一键启动所有传感器（可选）
+
+如果需要同时启动 LiDAR、相机和转台节点，可以使用一键启动命令：
+
+```bash
+ros2 launch perception_tower_sensor sensor_env.launch.py
+```
+
+指定转台串口：
+
+```bash
+ros2 launch perception_tower_sensor sensor_env.launch.py turntable_port:=/dev/ttyUSB1
+```
+
+这个命令会自动启动：
+- RoboSense Fairy LiDAR
+- Orbbec Gemini 336L 相机
+- 转台控制节点
+
 ## 环境说明
 
 容器内已预装：
