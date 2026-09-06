@@ -50,6 +50,11 @@ RUN apt-get update && apt-get install -y \
     ros-${ROS_DISTRO}-rmw-cyclonedds-cpp \
     && rm -rf /var/lib/apt/lists/*
 
+# ===== 转台节点依赖 =====
+RUN apt-get update && apt-get install -y \
+    python3-serial \
+    && rm -rf /var/lib/apt/lists/*
+
 # ===== 编译 Orbbec 相机驱动 =====
 COPY orbbec-v2-main.tar.gz /tmp/orbbec-v2-main.tar.gz
 RUN set -e && \

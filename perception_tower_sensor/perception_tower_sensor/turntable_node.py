@@ -105,6 +105,10 @@ class ServoClient:
         if self._reader_thread is not None:
             self._reader_thread.join(timeout=0.5)
 
+    @property
+    def is_open(self) -> bool:
+        return self._ser is not None and self._ser.is_open
+
     def _read_loop(self):
         while self._running:
             try:
@@ -188,20 +192,21 @@ class TurntableNode(Node):
             pos_origin=self._origin,
             deg_per_pos=self._dpp,
         )
+        self._state = TurntableStatus.STATE_IDLE
         try:
             self._servo.open()
             self.get_logger().info(f"serial opened: {self._port}")
         except Exception as exc:
-            self.get_logger().error(f"failed to open serial: {exc}")
-            raise
+            self.get_logger().error(f"failed to open serial: {exc}; turntable commands will be unavailable")
+            self._state = TurntableStatus.STATE_ERROR
 
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         self._status_pub = self.create_publisher(TurntableStatus, "/turntable/status", qos)
         self._srv = self.create_service(TurntableCommand, "/turntable/command", self._on_command)
 
-        self._state = TurntableStatus.STATE_IDLE
         self._last_pos = self._origin
         self._lock = threading.Lock()
+        self._shutdown = threading.Event()
 
         pub_period = 1.0 / self._pub_hz
         self._pub_timer = self.create_timer(pub_period, self._publish_status)
@@ -231,7 +236,10 @@ class TurntableNode(Node):
         self._home_timeout = self.get_parameter("home_timeout_s").value
 
     def _poll_loop(self, period: float):
-        while rclpy.ok():
+        while rclpy.ok() and not self._shutdown.is_set():
+            if not self._servo.is_open:
+                time.sleep(period)
+                continue
             t0 = time.monotonic()
             try:
                 pos = self._servo.read_position(timeout_s=period * 2.0)
@@ -240,7 +248,7 @@ class TurntableNode(Node):
             except Exception:
                 pass
             elapsed = time.monotonic() - t0
-            if elapsed < period:
+            if elapsed < period and not self._shutdown.is_set():
                 time.sleep(period - elapsed)
 
     def _publish_status(self):
@@ -254,13 +262,23 @@ class TurntableNode(Node):
 
     def _on_command(self, request, response):
         cmd = request.command
+        self.get_logger().info(
+            f"received turntable command: cmd={cmd}, target_deg={request.target_deg:.2f}, duration_s={request.duration_s:.2f}"
+        )
+        if not self._servo.is_open:
+            response.success = False
+            response.message = "serial not open"
+            self.get_logger().error(response.message)
+            return response
         if cmd == TurntableCommand.Request.CMD_HOME:
+            self.get_logger().info("executing HOME command")
             self._state = TurntableStatus.STATE_HOMING
             try:
                 self._servo.reset(timeout_s=self._home_timeout)
                 target_deg = request.target_deg if request.target_deg else 90.0
                 target = self._servo.deg_to_pos(target_deg)
                 time_ms = max(200, int(abs(target_deg) / 40.0 * 1000))
+                self.get_logger().info(f"home done, moving to {target_deg:.2f} deg (pos={target}, time_ms={time_ms})")
                 self._servo.move_to(target, time_ms)
                 self._state = TurntableStatus.STATE_IDLE
                 response.success = True
@@ -271,10 +289,12 @@ class TurntableNode(Node):
                 response.message = f"home failed: {exc}"
 
         elif cmd == TurntableCommand.Request.CMD_MOVE:
+            self.get_logger().info("executing MOVE command")
             self._state = TurntableStatus.STATE_MOVING
             try:
                 pos = self._servo.deg_to_pos(request.target_deg)
                 time_ms = max(200, int(request.duration_s * 1000)) if request.duration_s > 0 else 2000
+                self.get_logger().info(f"moving to {request.target_deg:.2f} deg (pos={pos}, time_ms={time_ms})")
                 self._servo.move_to(pos, time_ms)
                 response.success = True
                 response.message = f"moving to {request.target_deg:.1f} deg"
@@ -284,6 +304,7 @@ class TurntableNode(Node):
                 response.message = f"move failed: {exc}"
 
         elif cmd == TurntableCommand.Request.CMD_STOP:
+            self.get_logger().info("executing STOP command")
             try:
                 self._servo.stop()
                 self._state = TurntableStatus.STATE_IDLE
@@ -298,14 +319,23 @@ class TurntableNode(Node):
             response.success = False
             response.message = f"unknown command {cmd}"
 
+        self.get_logger().info(f"command result: success={response.success}, message='{response.message}'")
         return response
 
     def destroy_node(self):
+        self._shutdown.set()
+        try:
+            self._poll_thread.join(timeout=0.5)
+        except Exception:
+            pass
         try:
             self._servo.close()
         except Exception:
             pass
-        super().destroy_node()
+        try:
+            super().destroy_node()
+        except KeyboardInterrupt:
+            pass
 
 
 def main(args=None):
@@ -316,7 +346,10 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
+        try:
+            node.destroy_node()
+        except KeyboardInterrupt:
+            pass
         rclpy.shutdown()
 
 
