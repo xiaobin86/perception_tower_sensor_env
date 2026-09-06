@@ -24,6 +24,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 from perception_tower_sensor_interfaces.msg import TurntableStatus
 from perception_tower_sensor_interfaces.srv import TurntableCommand
+from rcl_interfaces.msg import SetParametersResult
 
 
 # --- Protocol parser ---
@@ -53,7 +54,7 @@ class ProtocolParser:
                 break
             chunk = bytes(self._buf[1:end])
             del self._buf[: end + 1]
-            if chunk == b"OK":
+            if chunk.upper() == b"OK":
                 events.append(_OK_EVENT)
             else:
                 m = _POSITION_RE.match(chunk)
@@ -113,7 +114,13 @@ class ServoClient:
         while self._running:
             try:
                 data = self._ser.read(256)
-            except Exception:
+            except Exception as exc:
+                print(f"[servo] read loop error: {exc}", flush=True)
+                try:
+                    self._ser.close()
+                except Exception:
+                    pass
+                self._ser = None
                 break
             if data:
                 events = self._parser.feed(data)
@@ -125,7 +132,16 @@ class ServoClient:
             if self._ser is None:
                 raise ServoError("serial not open")
             print(f"[servo] tx {payload!r}", flush=True)
-            self._ser.write(payload)
+            try:
+                self._ser.write(payload)
+            except Exception as exc:
+                print(f"[servo] write failed: {exc}", flush=True)
+                try:
+                    self._ser.close()
+                except Exception:
+                    pass
+                self._ser = None
+                raise ServoError(f"write failed: {exc}") from exc
 
     def _wait_event(self, kinds: tuple, timeout_s: float):
         deadline = time.monotonic() + timeout_s
@@ -158,8 +174,12 @@ class ServoClient:
         self._send(cmd.encode())
 
     def stop(self):
+        self._flush_replies()
         self._send(f"#{self._servo_id:03d}PDST!".encode())
-        self._wait_event(("ok",), 0.5)
+        try:
+            self._wait_event(("ok",), 0.5)
+        except ServoError:
+            print("[servo] stop did not get OK, continuing", flush=True)
 
     def read_position(self, timeout_s: float = 0.2) -> int:
         self._flush_replies()
@@ -168,8 +188,21 @@ class ServoClient:
         return int(ev[1])
 
     def reset(self, timeout_s: float = 30.0):
-        self._send(f"#{self._servo_id:03d}PRST!".encode())
-        self._wait_event(("ok",), timeout_s)
+        self._flush_replies()
+        for attempt in range(1, 4):
+            self._send(f"#{self._servo_id:03d}PRST!".encode())
+            try:
+                self._wait_event(("ok",), 2.0)
+                print(f"[servo] reset acknowledged on attempt {attempt}", flush=True)
+                return
+            except ServoError:
+                print(f"[servo] reset attempt {attempt} timed out waiting for OK", flush=True)
+        # Some controllers do not reply to RST; verify the device is alive by reading position.
+        try:
+            pos = self.read_position(timeout_s=1.0)
+            print(f"[servo] reset got no OK but device is alive at pos={pos}", flush=True)
+        except ServoError as exc:
+            raise ServoError(f"reset failed: no OK and cannot read position: {exc}") from exc
 
     def pos_to_deg(self, pos: int) -> float:
         return (pos - self._origin) * self._dpp
@@ -211,14 +244,36 @@ class TurntableNode(Node):
         pub_period = 1.0 / self._pub_hz
         self._pub_timer = self.create_timer(pub_period, self._publish_status)
 
-        poll_period = 1.0 / self._poll_hz
-        self._poll_thread = threading.Thread(target=self._poll_loop, args=(poll_period,), daemon=True)
-        self._poll_thread.start()
+        if self._poll_hz > 0.0:
+            poll_period = 1.0 / self._poll_hz
+            self._poll_thread = threading.Thread(target=self._poll_loop, args=(poll_period,), daemon=True)
+            self._poll_thread.start()
+        else:
+            self._poll_thread = None
+
+        self.add_on_set_parameters_callback(self._on_param_change)
+
+    def _on_param_change(self, params):
+        for param in params:
+            if param.name == "poll_hz":
+                new_hz = param.value
+                if new_hz > 0.0 and (self._poll_thread is None or not self._poll_thread.is_alive()):
+                    self.get_logger().info(f"restarting poll loop at {new_hz} Hz")
+                    self._shutdown.clear()
+                    poll_period = 1.0 / new_hz
+                    self._poll_thread = threading.Thread(target=self._poll_loop, args=(poll_period,), daemon=True)
+                    self._poll_thread.start()
+                elif new_hz <= 0.0 and self._poll_thread is not None:
+                    self.get_logger().info("stopping poll loop")
+                    self._shutdown.set()
+                    self._poll_thread.join(timeout=2.0)
+                    self._poll_thread = None
+        return SetParametersResult(successful=True)
 
     def _declare_params(self):
         self.declare_parameter("serial_port", "/dev/ttyUSB0")
         self.declare_parameter("serial_baud", 115200)
-        self.declare_parameter("poll_hz", 100.0)
+        self.declare_parameter("poll_hz", 0.0)
         self.declare_parameter("pub_hz", 50.0)
         self.declare_parameter("pos_origin", 500)
         self.declare_parameter("deg_per_pos", 0.02)
@@ -236,10 +291,20 @@ class TurntableNode(Node):
         self._home_timeout = self.get_parameter("home_timeout_s").value
 
     def _poll_loop(self, period: float):
+        reconnect_delay = 1.0
         while rclpy.ok() and not self._shutdown.is_set():
             if not self._servo.is_open:
-                time.sleep(period)
-                continue
+                try:
+                    self._servo.open()
+                    self.get_logger().info(f"serial reopened: {self._port}")
+                    self._state = TurntableStatus.STATE_IDLE
+                    reconnect_delay = 1.0
+                except Exception as exc:
+                    self.get_logger().warning(f"serial reopen failed: {exc}; retry in {reconnect_delay:.1f}s")
+                    self._state = TurntableStatus.STATE_ERROR
+                    time.sleep(reconnect_delay)
+                    reconnect_delay = min(reconnect_delay + 1.0, 10.0)
+                    continue
             t0 = time.monotonic()
             try:
                 pos = self._servo.read_position(timeout_s=period * 2.0)
@@ -324,10 +389,11 @@ class TurntableNode(Node):
 
     def destroy_node(self):
         self._shutdown.set()
-        try:
-            self._poll_thread.join(timeout=0.5)
-        except Exception:
-            pass
+        if self._poll_thread is not None:
+            try:
+                self._poll_thread.join(timeout=0.5)
+            except Exception:
+                pass
         try:
             self._servo.close()
         except Exception:
