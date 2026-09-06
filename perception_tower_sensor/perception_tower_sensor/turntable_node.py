@@ -120,6 +120,7 @@ class ServoClient:
         with self._write_lock:
             if self._ser is None:
                 raise ServoError("serial not open")
+            print(f"[servo] tx {payload!r}", flush=True)
             self._ser.write(payload)
 
     def _wait_event(self, kinds: tuple, timeout_s: float):
@@ -132,18 +133,25 @@ class ServoClient:
                 ev = self._reply_q.get(timeout=min(remain, 0.1))
             except queue.Empty:
                 continue
+            print(f"[servo] rx event {ev}", flush=True)
             if ev[0] in kinds:
                 return ev
 
     def _flush_replies(self):
+        count = 0
         while True:
             try:
                 self._reply_q.get_nowait()
+                count += 1
             except queue.Empty:
                 break
+        if count:
+            print(f"[servo] flushed {count} stale events", flush=True)
 
     def move_to(self, pos: int, time_ms: int):
-        self._send(f"#{self._servo_id:03d}P{pos}T{time_ms}!".encode())
+        cmd = f"#{self._servo_id:03d}P{pos}T{time_ms}!"
+        print(f"[servo] MOVE pos={pos} time_ms={time_ms} -> {cmd}", flush=True)
+        self._send(cmd.encode())
 
     def stop(self):
         self._send(f"#{self._servo_id:03d}PDST!".encode())
