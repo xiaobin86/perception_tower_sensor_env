@@ -1,0 +1,6 @@
+uint8 CMD_INIT=1
+uint8 CMD_SCAN=2
+uint8 command
+---
+bool accepted
+string message

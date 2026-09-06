@@ -1,0 +1,9 @@
+uint8 IDLE=0
+uint8 INITING=1
+uint8 READY=2
+uint8 SCANNING=3
+uint8 PROCESSING=4
+uint8 ERROR=5
+uint8 state
+uint8 progress_pct
+string message
