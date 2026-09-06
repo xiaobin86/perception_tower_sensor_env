@@ -22,8 +22,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
-from perception_tower_sensor_interfaces.msg import TurntableStatus
-from perception_tower_sensor_interfaces.srv import TurntableCommand
+from perception_tower_interfaces.msg import TurntableStatus
+from perception_tower_interfaces.srv import TurntableCommand
 
 
 # --- Protocol parser ---
