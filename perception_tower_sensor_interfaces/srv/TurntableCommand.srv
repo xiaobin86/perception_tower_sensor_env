@@ -1,0 +1,9 @@
+uint8 CMD_HOME=1
+uint8 CMD_MOVE=2
+uint8 CMD_STOP=3
+uint8 command
+float32 target_deg
+float32 duration_s
+---
+bool success
+string message
