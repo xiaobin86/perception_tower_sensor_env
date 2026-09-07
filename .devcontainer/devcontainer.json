@@ -10,5 +10,6 @@
 	],
 	"workspaceFolder": "/workspace",
 	"workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
-	"postCreateCommand": "bash -c 'echo \"source /opt/ros/humble/setup.bash\" >> ~/.bashrc && echo \"source /opt/orbbec_ws/install/setup.bash\" >> ~/.bashrc && echo \"source /opt/fairy_ws/install/setup.bash\" >> ~/.bashrc'"
+	"postCreateCommand": "bash -c 'echo \"source /opt/ros/humble/setup.bash\" >> ~/.bashrc && echo \"source /opt/orbbec_ws/install/setup.bash\" >> ~/.bashrc && echo \"source /opt/fairy_ws/install/setup.bash\" >> ~/.bashrc'",
+	"postStartCommand": "bash /workspace/docker/start-ptp.sh"
 }

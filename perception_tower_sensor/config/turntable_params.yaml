@@ -4,6 +4,7 @@ turntable_node:
     serial_baud: 115200
     poll_hz: 0.0
     pub_hz: 50.0
+    auto_report_ms: 20
     pos_origin: 500
     deg_per_pos: 0.02
     angle_sign: 1
