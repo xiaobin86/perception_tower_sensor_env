@@ -15,3 +15,5 @@ third_party/
 .devcontainer/.postCreateCommandMarker
 .devcontainer/.updateContentCommandMarker
 .devcontainer/devcontainer-lock.json
+turntable_output/
+config/*.yaml
