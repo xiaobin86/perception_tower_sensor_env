@@ -58,10 +58,12 @@ def _crc8(data: bytes) -> int:
 
 
 class ProtocolParser:
-    def __init__(self, servo_id: int = 0):
+    def __init__(self, servo_id: int = 0, protocol: str = "binary"):
         self._id = servo_id
         self._buf = bytearray()
         self._id_bytes = f"{servo_id:03d}".encode()
+        self._protocol = protocol
+        self._crc_error_count = 0
 
     def feed(self, data: bytes) -> List[tuple]:
         self._buf.extend(data)
@@ -78,20 +80,29 @@ class ProtocolParser:
             if not self._buf:
                 break
 
-            # Binary frame.
-            if self._buf[0] == _BINARY_HEAD[0]:
+            # Binary frame (only when protocol is binary or auto).
+            if self._buf[0] == _BINARY_HEAD[0] and self._protocol in ("binary", "auto"):
                 if len(self._buf) < _BINARY_FRAME_LEN:
                     break
                 frame = bytes(self._buf[:_BINARY_FRAME_LEN])
                 del self._buf[:_BINARY_FRAME_LEN]
 
                 if frame[2] != _BINARY_LEN or frame[3] != _BINARY_TYPE:
+                    if self._protocol == "auto":
+                        # Could be a text line that happens to start with AA 55; let text parser retry next round.
+                        continue
                     print(f"[parser] unexpected binary frame len/type: {frame[2]:02X} {frame[3]:02X}", flush=True)
                     continue
 
-                crc = _crc8(frame[2:9])
+                crc = _crc8(frame[2:8])
                 if crc != frame[9]:
-                    print(f"[parser] crc mismatch: calc={crc:02X} rx={frame[9]:02X}", flush=True)
+                    self._crc_error_count += 1
+                    if self._crc_error_count <= 3:
+                        print(f"[parser] crc mismatch: calc={crc:02X} rx={frame[9]:02X}", flush=True)
+                    elif self._crc_error_count == 4:
+                        print("[parser] suppressing further crc mismatch logs", flush=True)
+                    if self._protocol == "auto":
+                        continue
                     continue
 
                 pos = (frame[5] << 16) | (frame[6] << 8) | frame[7]
@@ -134,15 +145,17 @@ class ServoError(RuntimeError):
 
 class ServoClient:
     def __init__(self, port: str, baud: int = 115200, servo_id: int = 0,
-                 pos_origin: int = 500, deg_per_pos: float = 0.02):
+                 pos_origin: int = 500, deg_per_pos: float = 0.02, protocol: str = "binary"):
         self._port = port
         self._baud = baud
         self._servo_id = servo_id
         self._origin = pos_origin
         self._dpp = deg_per_pos
+        self._protocol = protocol
         self._ser = None
-        self._parser = ProtocolParser(servo_id)
-        self._reply_q: "queue.Queue[tuple]" = queue.SimpleQueue()
+        self._parser = ProtocolParser(servo_id, protocol)
+        self._cmd_reply_q: "queue.Queue[tuple]" = queue.SimpleQueue()
+        self._pos_event_q: "queue.Queue[tuple]" = queue.SimpleQueue()
         self._write_lock = threading.Lock()
         self._reader_thread: Optional[threading.Thread] = None
         self._running = False
@@ -186,7 +199,10 @@ class ServoClient:
             if data:
                 events = self._parser.feed(data)
                 for ev in events:
-                    self._reply_q.put(ev)
+                    if ev[0] == "ok":
+                        self._cmd_reply_q.put(ev)
+                    else:
+                        self._pos_event_q.put(ev)
 
     def _send(self, payload: bytes):
         with self._write_lock:
@@ -214,7 +230,7 @@ class ServoClient:
             if remain <= 0:
                 raise ServoError(f"timeout waiting for {kinds}")
             try:
-                ev = self._reply_q.get(timeout=min(remain, 0.1))
+                ev = self._cmd_reply_q.get(timeout=min(remain, 0.1))
             except queue.Empty:
                 continue
             print(f"[servo] rx event {ev}", flush=True)
@@ -225,7 +241,7 @@ class ServoClient:
         count = 0
         while True:
             try:
-                self._reply_q.get_nowait()
+                self._cmd_reply_q.get_nowait()
                 count += 1
             except queue.Empty:
                 break
@@ -299,6 +315,7 @@ class TurntableNode(Node):
             baud=self._baud,
             pos_origin=self._origin,
             deg_per_pos=self._dpp,
+            protocol=self._protocol,
         )
         self._state = TurntableStatus.STATE_IDLE
         try:
@@ -321,6 +338,8 @@ class TurntableNode(Node):
         self._last_done = True
         self._lock = threading.Lock()
         self._shutdown = threading.Event()
+        self._cmd_queue: "queue.Queue[tuple]" = queue.SimpleQueue()
+        self._cmd_result_q: "queue.Queue[tuple]" = queue.SimpleQueue()
 
         pub_period = 1.0 / self._pub_hz
         self._pub_timer = self.create_timer(pub_period, self._publish_status)
@@ -341,6 +360,9 @@ class TurntableNode(Node):
             self._poll_thread.start()
         else:
             self._poll_thread = None
+
+        self._cmd_thread = threading.Thread(target=self._cmd_loop, daemon=True)
+        self._cmd_thread.start()
 
         self.add_on_set_parameters_callback(self._on_param_change)
 
@@ -385,6 +407,7 @@ class TurntableNode(Node):
     def _declare_params(self):
         self.declare_parameter("serial_port", "/dev/ttyUSB0")
         self.declare_parameter("serial_baud", 115200)
+        self.declare_parameter("protocol", "binary")
         self.declare_parameter("poll_hz", 0.0)
         self.declare_parameter("pub_hz", 50.0)
         self.declare_parameter("auto_report_ms", 20)
@@ -396,6 +419,7 @@ class TurntableNode(Node):
     def _load_params(self):
         self._port = self.get_parameter("serial_port").value
         self._baud = self.get_parameter("serial_baud").value
+        self._protocol = self.get_parameter("protocol").value
         self._poll_hz = self.get_parameter("poll_hz").value
         self._pub_hz = self.get_parameter("pub_hz").value
         self._auto_report_ms = self.get_parameter("auto_report_ms").value
@@ -429,7 +453,7 @@ class TurntableNode(Node):
                     latest = None
                     while True:
                         try:
-                            ev = self._servo._reply_q.get_nowait()
+                            ev = self._servo._pos_event_q.get_nowait()
                         except queue.Empty:
                             break
                         if ev[0] == "pos":
@@ -439,17 +463,83 @@ class TurntableNode(Node):
                             self._last_pos = int(latest[1])
                             self._last_batch = int(latest[2])
                             self._last_done = bool(latest[3])
+                            # Transition state based on actual motion completion.
+                            if self._last_done:
+                                if self._state == TurntableStatus.STATE_MOVING:
+                                    self._state = TurntableStatus.STATE_IDLE
+                            else:
+                                if self._state == TurntableStatus.STATE_IDLE:
+                                    self._state = TurntableStatus.STATE_MOVING
                 elif self._poll_hz > 0.0:
                     pos, batch, done = self._servo.read_position(timeout_s=period * 2.0)
                     with self._lock:
                         self._last_pos = pos
                         self._last_batch = batch
                         self._last_done = done
+                        if done and self._state == TurntableStatus.STATE_MOVING:
+                            self._state = TurntableStatus.STATE_IDLE
+                        elif not done and self._state == TurntableStatus.STATE_IDLE:
+                            self._state = TurntableStatus.STATE_MOVING
             except Exception:
                 pass
             elapsed = time.monotonic() - t0
             if elapsed < period and not self._shutdown.is_set():
                 time.sleep(period - elapsed)
+
+    def _cmd_loop(self):
+        while rclpy.ok() and not self._shutdown.is_set():
+            try:
+                cmd, target_deg, duration_s = self._cmd_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if cmd == TurntableCommand.Request.CMD_HOME:
+                self._execute_home(target_deg)
+            elif cmd == TurntableCommand.Request.CMD_MOVE:
+                self._execute_move(target_deg, duration_s)
+            elif cmd == TurntableCommand.Request.CMD_STOP:
+                self._execute_stop()
+            else:
+                self.get_logger().warning(f"unknown command {cmd}")
+
+    def _execute_home(self, target_deg: float):
+        self.get_logger().info("executing HOME command")
+        self._state = TurntableStatus.STATE_HOMING
+        try:
+            self._servo.reset(timeout_s=self._home_timeout)
+            if self._auto_report_ms > 0:
+                self._servo.start_auto_report(self._auto_report_ms)
+            target_deg = target_deg if target_deg else 90.0
+            target = self._servo.deg_to_pos(target_deg)
+            time_ms = max(200, int(abs(target_deg) / 40.0 * 1000))
+            self.get_logger().info(f"home done, moving to {target_deg:.2f} deg (pos={target}, time_ms={time_ms})")
+            self._servo.move_to(target, time_ms)
+            self._state = TurntableStatus.STATE_MOVING
+        except Exception as exc:
+            self.get_logger().error(f"home failed: {exc}")
+            self._state = TurntableStatus.STATE_ERROR
+
+    def _execute_move(self, target_deg: float, duration_s: float):
+        self.get_logger().info("executing MOVE command")
+        self._state = TurntableStatus.STATE_MOVING
+        try:
+            pos = self._servo.deg_to_pos(target_deg)
+            time_ms = max(200, int(duration_s * 1000)) if duration_s > 0 else 2000
+            self.get_logger().info(f"moving to {target_deg:.2f} deg (pos={pos}, time_ms={time_ms})")
+            if self._auto_report_ms > 0:
+                self._servo.start_auto_report(self._auto_report_ms)
+            self._servo.move_to(pos, time_ms)
+        except Exception as exc:
+            self.get_logger().error(f"move failed: {exc}")
+            self._state = TurntableStatus.STATE_ERROR
+
+    def _execute_stop(self):
+        self.get_logger().info("executing STOP command")
+        try:
+            self._servo.stop()
+            self._state = TurntableStatus.STATE_IDLE
+        except Exception as exc:
+            self.get_logger().error(f"stop failed: {exc}")
+            self._state = TurntableStatus.STATE_ERROR
 
     def _publish_status(self):
         msg = TurntableStatus()
@@ -477,61 +567,10 @@ class TurntableNode(Node):
             response.message = "serial not open"
             self.get_logger().error(response.message)
             return response
-        if cmd == TurntableCommand.Request.CMD_HOME:
-            self.get_logger().info("executing HOME command")
-            self._state = TurntableStatus.STATE_HOMING
-            try:
-                self._servo.reset(timeout_s=self._home_timeout)
-                if self._auto_report_ms > 0:
-                    self._servo.start_auto_report(self._auto_report_ms)
-                target_deg = request.target_deg if request.target_deg else 90.0
-                target = self._servo.deg_to_pos(target_deg)
-                time_ms = max(200, int(abs(target_deg) / 40.0 * 1000))
-                self.get_logger().info(f"home done, moving to {target_deg:.2f} deg (pos={target}, time_ms={time_ms})")
-                self._servo.move_to(target, time_ms)
-                self._state = TurntableStatus.STATE_IDLE
-                response.success = True
-                response.message = "homed"
-            except Exception as exc:
-                self._state = TurntableStatus.STATE_ERROR
-                response.success = False
-                response.message = f"home failed: {exc}"
-
-        elif cmd == TurntableCommand.Request.CMD_MOVE:
-            self.get_logger().info("executing MOVE command")
-            self._state = TurntableStatus.STATE_MOVING
-            try:
-                pos = self._servo.deg_to_pos(request.target_deg)
-                time_ms = max(200, int(request.duration_s * 1000)) if request.duration_s > 0 else 2000
-                self.get_logger().info(f"moving to {request.target_deg:.2f} deg (pos={pos}, time_ms={time_ms})")
-                # Restart auto report so the device increments BATCH for this motion stream.
-                if self._auto_report_ms > 0:
-                    self._servo.start_auto_report(self._auto_report_ms)
-                self._servo.move_to(pos, time_ms)
-                response.success = True
-                response.message = f"moving to {request.target_deg:.1f} deg"
-            except Exception as exc:
-                self._state = TurntableStatus.STATE_ERROR
-                response.success = False
-                response.message = f"move failed: {exc}"
-
-        elif cmd == TurntableCommand.Request.CMD_STOP:
-            self.get_logger().info("executing STOP command")
-            try:
-                self._servo.stop()
-                self._state = TurntableStatus.STATE_IDLE
-                response.success = True
-                response.message = "stopped"
-            except Exception as exc:
-                self._state = TurntableStatus.STATE_ERROR
-                response.success = False
-                response.message = f"stop failed: {exc}"
-
-        else:
-            response.success = False
-            response.message = f"unknown command {cmd}"
-
-        self.get_logger().info(f"command result: success={response.success}, message='{response.message}'")
+        # Enqueue command for background execution so the ROS2 executor is not blocked.
+        self._cmd_queue.put((cmd, request.target_deg, request.duration_s))
+        response.success = True
+        response.message = "command accepted"
         return response
 
     def destroy_node(self):
