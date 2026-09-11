@@ -103,6 +103,37 @@ ros2 topic echo /turntable/status
 | `batch` | 当前运动批次号，每次新的自动上报启动后递增 |
 | `done` | `true` 表示运动完成/静止，`false` 表示运动中 |
 
+### 控制命令
+
+通过 ROS2 service 发送运动指令：
+
+```bash
+# HOME：复位到原点，再转到 90°（耗时 2 秒）
+ros2 service call /turntable/command perception_tower_sensor_interfaces/srv/TurntableCommand \
+  "{command: 1, target_deg: 90.0, duration_s: 2.0}"
+
+# MOVE：直接转到 45°（耗时 1 秒）
+ros2 service call /turntable/command perception_tower_sensor_interfaces/srv/TurntableCommand \
+  "{command: 2, target_deg: 45.0, duration_s: 1.0}"
+
+# MOVE：转到 180°（耗时 2 秒）
+ros2 service call /turntable/command perception_tower_sensor_interfaces/srv/TurntableCommand \
+  "{command: 2, target_deg: 180.0, duration_s: 2.0}"
+
+# STOP：立即停止
+ros2 service call /turntable/command perception_tower_sensor_interfaces/srv/TurntableCommand \
+  "{command: 3}"
+```
+
+查看状态：
+
+```bash
+ros2 topic echo /turntable/status --once
+```
+
+- `state: 2` + `done: false` → 运动中
+- `state: 0` + `done: true` → 已到位
+
 ### 可调参数
 
 见 `perception_tower_sensor/config/turntable_params.yaml`：
@@ -110,6 +141,7 @@ ros2 topic echo /turntable/status
 ```yaml
 serial_port: /dev/ttyUSB0
 serial_baud: 115200
+protocol: "binary"      # text | binary | auto
 poll_hz: 0.0          # 传统轮询频率；默认 0，使用自动上报
 pub_hz: 50.0          # /turntable/status 发布频率
 auto_report_ms: 20    # 自动上报间隔，最小 10 ms
