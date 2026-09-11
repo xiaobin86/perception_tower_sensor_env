@@ -96,7 +96,8 @@ RUN set -e && \
     colcon build --event-handlers console_direct+ --packages-select rslidar_msg rslidar_sdk --cmake-args -DCMAKE_BUILD_TYPE=Release && \
     sed -i "s|config_file = ''|config_file = '/opt/fairy_ws/config/config.yaml'|" /opt/fairy_ws/install/rslidar_sdk/share/rslidar_sdk/launch/start.py && \
     sed -i "s|lidar_type: RSM1|lidar_type: RSFAIRY|" /opt/fairy_ws/config/config.yaml && \
-    (grep -q "timestamp_type:" /opt/fairy_ws/config/config.yaml && sed -i "s|timestamp_type:.*|timestamp_type: PTP|" /opt/fairy_ws/config/config.yaml || echo "timestamp_type: PTP" >> /opt/fairy_ws/config/config.yaml) && \
+    (grep -q "timestamp_type:" /opt/fairy_ws/config/config.yaml && sed -i "s|timestamp_type:.*|timestamp_type: SYSTEM|" /opt/fairy_ws/config/config.yaml || echo "timestamp_type: SYSTEM" >> /opt/fairy_ws/config/config.yaml) && \
+    sed -i "s|use_lidar_clock: true|use_lidar_clock: false|" /opt/fairy_ws/config/config.yaml && \
     test -d /opt/fairy_ws/install/rslidar_sdk && \
     rm -rf build log src
 
