@@ -29,6 +29,8 @@ from sensor_msgs.msg import Image, PointCloud2
 SENSOR_ENV_LAUNCH = "ros2 launch perception_tower_sensor sensor_env.launch.py"
 ORBBEC_USB_VENDOR_ID = "2bc5"
 USBDEVFS_RESET_IOCTL = 0x5514
+MIDDLE_12_RINGS = tuple(range(42, 43))
+FAST_MOVE_DURATION_S = 0.2
 
 from perception_tower_sensor_interfaces.srv import TurntableCommand
 from perception_tower_sensor_interfaces.msg import TurntableStatus
@@ -42,15 +44,6 @@ except ImportError:
     HAS_TKINTER = False
     print("Error: tkinter is not installed")
     sys.exit(1)
-
-
-def get_font(root=None):
-    candidates = ["Noto Sans CJK SC", "WenQuanYi Micro Hei", "Microsoft YaHei", "SimHei", "Arial Unicode MS", "Arial"]
-    available = set(tkfont.families(root=root))
-    for name in candidates:
-        if name in available:
-            return name
-    return "Arial"
 
 
 def rotation_matrix_x(deg: float) -> np.ndarray:
@@ -110,6 +103,7 @@ class TurntableGuiController(Node):
         self._executor: MultiThreadedExecutor | None = None
         self._no_fairy = config.get("no_fairy", False)
         self._rotation_axis = np.array(config.get("rotation_axis", [1.0, 0.0, 0.0]), dtype=np.float64)
+        self._max_dist: float = 3.0
 
         self.tt_cli = self.create_client(TurntableCommand, "/turntable/command")
         tt_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -120,6 +114,10 @@ class TurntableGuiController(Node):
         cam_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.color_sub = self.create_subscription(Image, color_topic, self._on_color, cam_qos)
         self.depth_sub = self.create_subscription(Image, depth_topic, self._on_depth, cam_qos)
+        self.depth_cloud_topic = config.get("depth_cloud_topic", "/camera/depth/points")
+        self.depth_cloud_sub = self.create_subscription(
+            PointCloud2, self.depth_cloud_topic, self._on_depth_cloud, cam_qos
+        )
 
         if not self._no_fairy:
             fairy_qos = QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE)
@@ -140,6 +138,9 @@ class TurntableGuiController(Node):
         self.color_ts: float | None = None
         self.depth_msg: Image | None = None
         self.depth_ts: float | None = None
+        self.depth_cloud_msg: PointCloud2 | None = None
+        self.depth_cloud_ts: float | None = None
+        self.depth_cloud_xyz: np.ndarray | None = None
 
         self._launch_proc: subprocess.Popen | None = None
 
@@ -303,6 +304,10 @@ class TurntableGuiController(Node):
         self.depth_msg = msg
         self.depth_ts = time.monotonic()
 
+    def _on_depth_cloud(self, msg: PointCloud2):
+        self.depth_cloud_msg = msg
+        self.depth_cloud_ts = time.monotonic()
+
     def _on_fairy(self, msg: PointCloud2):
         self._fairy_msg_count += 1
         if not self._capturing:
@@ -403,6 +408,57 @@ class TurntableGuiController(Node):
                 f.write(bytes(color.data))
             with open(dpath + ".raw", "wb") as f:
                 f.write(bytes(depth.data))
+        self.save_depth_cloud()
+
+    def save_depth_cloud(self):
+        msg = self.depth_cloud_msg
+        if msg is None:
+            self.log("Depth point cloud not available")
+            return
+        xyz = self._pointcloud2_xyz(msg)
+        if xyz is None or len(xyz) == 0:
+            self.log("Depth point cloud empty")
+            return
+        self.depth_cloud_xyz = xyz
+        path = os.path.join(self.out_dir, "depth_cloud.ply")
+        self._save_ply(path, xyz)
+        self.log(f"Depth point cloud saved: {path} ({len(xyz)} points)")
+
+    def process_depth_cloud(self):
+        xyz = self.depth_cloud_xyz
+        if xyz is None or len(xyz) == 0:
+            self.log("Depth point cloud not available for cropping")
+            return
+        max_dist = self._max_dist
+        if max_dist is not None:
+            xyz = xyz[np.linalg.norm(xyz, axis=1) < max_dist]
+        path = os.path.join(self.out_dir, "depth_cloud_cropped.ply")
+        self._save_ply(path, xyz)
+        self.log(f"Depth point cloud cropped: {path} ({len(xyz)} points, max_dist={max_dist})")
+
+    def _pointcloud2_xyz(self, msg: PointCloud2) -> np.ndarray | None:
+        try:
+            import struct
+            fields = {f.name: f.offset for f in msg.fields}
+            if not all(name in fields for name in ('x', 'y', 'z')):
+                return None
+            point_step = msg.point_step
+            data = msg.data
+            num_points = len(data) // point_step
+            pts = []
+            for i in range(num_points):
+                offset = i * point_step
+                x = struct.unpack_from('f', data, offset + fields['x'])[0]
+                y = struct.unpack_from('f', data, offset + fields['y'])[0]
+                z = struct.unpack_from('f', data, offset + fields['z'])[0]
+                if np.isfinite(x) and np.isfinite(y) and np.isfinite(z) and (x != 0.0 or y != 0.0 or z != 0.0):
+                    pts.append([x, y, z])
+            if not pts:
+                return None
+            return np.array(pts, dtype=np.float32)
+        except Exception as exc:
+            self.log(f"Depth cloud parse failed: {exc}")
+            return None
 
     def reset_to_ready(self, ready_deg: float = 90.0, sweep_speed: float = 40.0):
         self.log("=== Reset to 90 deg ===")
@@ -416,8 +472,7 @@ class TurntableGuiController(Node):
         self.log("Home complete")
 
         self.log(f"2) Move to {ready_deg}deg...")
-        delta = abs(ready_deg)
-        duration = max(0.5, delta / sweep_speed)
+        duration = FAST_MOVE_DURATION_S
         if not self.call_turntable(TurntableCommand.Request.CMD_MOVE, ready_deg, duration):
             self.log("Move failed")
             return False
@@ -445,8 +500,7 @@ class TurntableGuiController(Node):
                 f"Not at ready position (current={self.tt_status.angle_deg:.2f}deg), "
                 f"moving to {ready_deg}deg before scan..."
             )
-            delta = abs(self.tt_status.angle_deg - ready_deg)
-            duration = max(0.5, delta / sweep_speed)
+            duration = FAST_MOVE_DURATION_S
             if not self.call_turntable(TurntableCommand.Request.CMD_MOVE, ready_deg, duration):
                 self.log("Move to ready position failed")
                 return False
@@ -468,8 +522,7 @@ class TurntableGuiController(Node):
         self.log("Pre-scan photo saved")
 
         self.log(f"2) Move to scan start {scan_start_deg}deg...")
-        delta = abs(scan_start_deg - ready_deg)
-        duration = max(0.5, delta / sweep_speed)
+        duration = FAST_MOVE_DURATION_S
         if not self.call_turntable(TurntableCommand.Request.CMD_MOVE, scan_start_deg, duration):
             self.log("Move to scan start failed")
             return False
@@ -517,8 +570,7 @@ class TurntableGuiController(Node):
         self._merge_thread = merge_thread
         merge_thread.start()
 
-        delta = abs(scan_end_deg - ready_deg)
-        duration = max(0.5, delta / sweep_speed)
+        duration = FAST_MOVE_DURATION_S
         return_success = self.call_turntable(TurntableCommand.Request.CMD_MOVE, ready_deg, duration)
         if return_success:
             return_success = self.wait_for_turntable_idle(target_deg=ready_deg, timeout_s=60.0)
@@ -550,9 +602,10 @@ class TurntableGuiController(Node):
                     ply_path = os.path.join(
                         capture.out_dir, "frames", f"frame_{len(captured_frames):04d}.ply"
                     )
-                    self._save_ply(ply_path, points)
+                    self._save_ply(ply_path, points[:, :3])
             self.log(f"Processed {len(captured_frames)} frames")
         self.stitch_and_save_merged(captured_frames, capture)
+        self.process_depth_cloud()
 
     def stitch_and_save_merged(
         self,
@@ -566,13 +619,23 @@ class TurntableGuiController(Node):
         axis = self._rotation_axis / np.linalg.norm(self._rotation_axis)
         angle_times = np.array([s[0] for s in capture.angle_samples])
         angle_values = np.array([s[1] for s in capture.angle_samples])
+        keep = list(MIDDLE_12_RINGS)
+        max_dist = self._max_dist
+        self.log(f"Merging rings {keep[0]}-{keep[-1]}, max_dist={max_dist}")
 
         all_points = []
-        for frame_stamp, frame_xyz in captured_frames:
+        for frame_stamp, frame_data in captured_frames:
             angle_deg = np.interp(frame_stamp, angle_times, angle_values)
-            if capture.scan_start_deg <= angle_deg <= capture.scan_end_deg:
-                transformed = transform_frame(frame_xyz, angle_deg, axis)
-                all_points.append(transformed)
+            if not (capture.scan_start_deg <= angle_deg <= capture.scan_end_deg):
+                continue
+            xyz = frame_data[:, :3]
+            rings = frame_data[:, 3].astype(np.int16)
+            valid = np.isfinite(xyz).all(axis=1)
+            frame_xyz = xyz[valid & np.isin(rings, keep)]
+            if max_dist is not None:
+                frame_xyz = frame_xyz[np.linalg.norm(frame_xyz, axis=1) < max_dist]
+            transformed = transform_frame(frame_xyz, angle_deg, axis)
+            all_points.append(transformed)
 
         if not all_points:
             self.log("No frames in scan range to merge")
@@ -603,24 +666,23 @@ class TurntableGuiController(Node):
     def _pointcloud2_to_numpy(self, msg: PointCloud2) -> np.ndarray | None:
         try:
             import struct
-            fields = {f.name: (f.offset, f.datatype) for f in msg.fields}
+            fields = {f.name: f.offset for f in msg.fields}
             if not all(name in fields for name in ('x', 'y', 'z')):
                 return None
+            width = msg.width or 1
             point_step = msg.point_step
-            points = []
             data = msg.data
             num_points = len(data) // point_step
+            out = np.empty((num_points, 4), dtype=np.float32)
             for i in range(num_points):
                 offset = i * point_step
-                x = struct.unpack_from('f', data, offset + fields['x'][0])[0]
-                y = struct.unpack_from('f', data, offset + fields['y'][0])[0]
-                z = struct.unpack_from('f', data, offset + fields['z'][0])[0]
-                if not (np.isnan(x) or np.isnan(y) or np.isnan(z)):
-                    points.append([x, y, z])
-            if points:
-                return np.array(points, dtype=np.float32)
-            return None
-        except Exception:
+                out[i, 0] = struct.unpack_from('f', data, offset + fields['x'])[0]
+                out[i, 1] = struct.unpack_from('f', data, offset + fields['y'])[0]
+                out[i, 2] = struct.unpack_from('f', data, offset + fields['z'])[0]
+                out[i, 3] = i % width
+            return out
+        except Exception as exc:
+            self.log(f"PointCloud2 parse failed: {exc}")
             return None
 
     def _save_ply(self, path: str, xyz: np.ndarray):
@@ -729,7 +791,7 @@ class TurntableGuiApp:
         self.root.title("Perception Tower Turntable Control")
         self.root.geometry("700x520")
 
-        self.font_name = get_font(self.root)
+        self.font_name = tkfont.nametofont("TkDefaultFont").actual("family")
         self.font_large = (self.font_name, 14)
         self.font_normal = (self.font_name, 11)
 
@@ -759,6 +821,24 @@ class TurntableGuiApp:
         self.range_entry = tk.Entry(range_frame, textvariable=self.range_var, width=8, font=self.font_normal)
         self.range_entry.pack(side=tk.LEFT, padx=5)
         tk.Label(range_frame, text="deg", font=self.font_normal).pack(side=tk.LEFT)
+
+        dist_frame = tk.Frame(self.root)
+        dist_frame.pack(pady=5)
+
+        tk.Label(dist_frame, text="Max distance:", font=self.font_normal).pack(side=tk.LEFT)
+        self.dist_var = tk.StringVar(value="3.0")
+        self.dist_entry = tk.Entry(dist_frame, textvariable=self.dist_var, width=8, font=self.font_normal)
+        self.dist_entry.pack(side=tk.LEFT, padx=5)
+        tk.Label(dist_frame, text="m", font=self.font_normal).pack(side=tk.LEFT)
+
+        speed_frame = tk.Frame(self.root)
+        speed_frame.pack(pady=5)
+
+        tk.Label(speed_frame, text="Scan speed:", font=self.font_normal).pack(side=tk.LEFT)
+        self.speed_var = tk.StringVar(value=f"{self.sweep_speed:g}")
+        self.speed_entry = tk.Entry(speed_frame, textvariable=self.speed_var, width=8, font=self.font_normal)
+        self.speed_entry.pack(side=tk.LEFT, padx=5)
+        tk.Label(speed_frame, text="deg/s", font=self.font_normal).pack(side=tk.LEFT)
 
         self.reset_btn = tk.Button(
             self.root, text="1. Reset to 90deg", font=self.font_large,
@@ -812,6 +892,26 @@ class TurntableGuiApp:
             messagebox.showerror("Error", f"Invalid scan range: {e}")
             return None
 
+    def _get_max_dist(self) -> float | None:
+        try:
+            value = float(self.dist_var.get())
+            if value <= 0:
+                raise ValueError("must be positive")
+            return value
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid max distance: {e}")
+            return None
+
+    def _get_sweep_speed(self) -> float | None:
+        try:
+            value = float(self.speed_var.get())
+            if value <= 0:
+                raise ValueError("must be positive")
+            return value
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid scan speed: {e}")
+            return None
+
     def _run_in_thread(self, func):
         def wrapper():
             try:
@@ -825,6 +925,10 @@ class TurntableGuiApp:
         self.scan_btn.config(state=scan_state)
 
     def _on_reset(self):
+        speed = self._get_sweep_speed()
+        if speed is None:
+            return
+        self.sweep_speed = speed
         self._set_buttons(tk.DISABLED, tk.DISABLED)
         self._run_in_thread(self._do_reset)
 
@@ -844,6 +948,14 @@ class TurntableGuiApp:
         scan_range = self._get_scan_range()
         if scan_range is None:
             return
+        max_dist = self._get_max_dist()
+        if max_dist is None:
+            return
+        speed = self._get_sweep_speed()
+        if speed is None:
+            return
+        self.sweep_speed = speed
+        self.node._max_dist = max_dist
         self._set_buttons(tk.DISABLED, tk.DISABLED)
         self._run_in_thread(lambda: self._do_scan(scan_range))
 
@@ -875,6 +987,7 @@ def main():
     parser = argparse.ArgumentParser(description="Perception Tower Turntable Control GUI")
     parser.add_argument("--color-topic", default="/camera/color/image_raw", help="Color image topic")
     parser.add_argument("--depth-topic", default="/camera/depth/image_raw", help="Depth image topic")
+    parser.add_argument("--depth-cloud-topic", default="/camera/depth/points", help="Depth point cloud topic")
     parser.add_argument("--fairy-topic", default="/rslidar_points", help="LiDAR point cloud topic")
     parser.add_argument("--ready-deg", type=float, default=90.0, help="Ready angle")
     parser.add_argument("--sweep-speed", type=float, default=40.0, help="Sweep speed")
@@ -886,6 +999,7 @@ def main():
     config = {
         "no_fairy": args.no_fairy,
         "rotation_axis": list(args.rotation_axis),
+        "depth_cloud_topic": args.depth_cloud_topic,
     }
 
     rclpy.init()
