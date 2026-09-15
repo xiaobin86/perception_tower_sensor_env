@@ -7,6 +7,7 @@ Usage:
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Shutdown, TimerAction
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -16,6 +17,7 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     turntable_port = LaunchConfiguration("turntable_port")
     params_file = LaunchConfiguration("params_file")
+    use_fairy = LaunchConfiguration("use_fairy")
 
     default_params = PathJoinSubstitution(
         [FindPackageShare("perception_tower_sensor"), "config", "turntable_params.yaml"]
@@ -29,6 +31,7 @@ def generate_launch_description():
         namespace="rslidar_sdk",
         output="screen",
         parameters=[{"config_path": "/opt/fairy_ws/config/config.yaml"}],
+        condition=IfCondition(use_fairy),
         on_exit=Shutdown(),
     )
     rslidar_node_delayed = TimerAction(period=10.0, actions=[rslidar_node])
@@ -61,6 +64,11 @@ def generate_launch_description():
             "params_file",
             default_value=default_params,
             description="Path to turntable parameter YAML.",
+        ),
+        DeclareLaunchArgument(
+            "use_fairy",
+            default_value="true",
+            description="Launch the RoboSense Fairy LiDAR driver.",
         ),
         orbbec_launch,
         rslidar_node_delayed,
