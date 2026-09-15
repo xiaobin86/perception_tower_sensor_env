@@ -17,3 +17,4 @@ third_party/
 .devcontainer/devcontainer-lock.json
 turntable_output/
 config/*.yaml
+!config/install_side_mount.yaml
