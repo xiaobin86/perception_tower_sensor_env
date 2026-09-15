@@ -26,6 +26,9 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image, PointCloud2
 
+from install_config import InstallConfig, rotation_matrix
+from lakibeam_viewer import LakiBeamViewer, ScanPoint, scan_to_xy
+
 SENSOR_ENV_LAUNCH = "ros2 launch perception_tower_sensor sensor_env.launch.py"
 ORBBEC_USB_VENDOR_ID = "2bc5"
 USBDEVFS_RESET_IOCTL = 0x5514
@@ -37,7 +40,7 @@ from perception_tower_sensor_interfaces.msg import TurntableStatus
 
 try:
     import tkinter as tk
-    from tkinter import messagebox, scrolledtext
+    from tkinter import messagebox, scrolledtext, ttk
     import tkinter.font as tkfont
     HAS_TKINTER = True
 except ImportError:
@@ -104,6 +107,13 @@ class TurntableGuiController(Node):
         self._no_fairy = config.get("no_fairy", False)
         self._rotation_axis = np.array(config.get("rotation_axis", [1.0, 0.0, 0.0]), dtype=np.float64)
         self._max_dist: float = 3.0
+        self._lidar_kind = config.get("lidar_kind", "fairy")
+        self._lakibeam_port = int(config.get("lakibeam_port", 2368))
+        self._install_config_path = config.get("install_config", "config/install_side_mount.yaml")
+        self._lakibeam: LakiBeamViewer | None = None
+        self._lb_frames: list[tuple[float, list[ScanPoint]]] = []
+        self._lb_thread: threading.Thread | None = None
+        self._lb_capturing = False
 
         self.tt_cli = self.create_client(TurntableCommand, "/turntable/command")
         tt_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -267,6 +277,12 @@ class TurntableGuiController(Node):
         self._signal_tree(proc.pid, pgid, signal.SIGKILL)
         self._wait_process(proc, 2.0)
 
+    def restart_sensor_env(self, use_fairy: bool) -> bool:
+        self.log("Restarting background services...")
+        self._terminate_launch_process()
+        self._launch_proc = None
+        return self.launch_sensor_env(use_fairy=use_fairy)
+
     def cleanup(self):
         self._log_callback = None
         self.log("Cleaning up background services...")
@@ -278,6 +294,7 @@ class TurntableGuiController(Node):
         if self._launch_proc is not None and self._launch_proc.poll() is None:
             self._terminate_launch_process()
             self.log("Background services stopped")
+        self.close_lakibeam()
 
     def set_log_callback(self, callback):
         self._log_callback = callback
@@ -460,6 +477,89 @@ class TurntableGuiController(Node):
             self.log(f"Depth cloud parse failed: {exc}")
             return None
 
+    def open_lakibeam(self) -> bool:
+        if self._lakibeam is not None:
+            return True
+        try:
+            self._lakibeam = LakiBeamViewer(host_ip="0.0.0.0", port=self._lakibeam_port)
+            self._lakibeam.connect()
+        except Exception as exc:
+            self.log(f"LakiBeam UDP bind failed: {exc}")
+            self._lakibeam = None
+            return False
+        self.log(f"LakiBeam UDP bound 0.0.0.0:{self._lakibeam_port}")
+        return True
+
+    def close_lakibeam(self):
+        if self._lakibeam is not None:
+            self._lakibeam.close()
+            self._lakibeam = None
+
+    def _lakibeam_capture_loop(self):
+        while self._lb_capturing and self._lakibeam is not None:
+            scan = self._lakibeam.receive_scan()
+            if scan:
+                self._lb_frames.append((time.monotonic(), scan))
+
+    def _start_lakibeam_capture(self):
+        self._lb_frames.clear()
+        if self._lakibeam is not None:
+            self._lakibeam.clear_buffer()
+        self._lb_capturing = True
+        self._lb_thread = threading.Thread(target=self._lakibeam_capture_loop, daemon=True)
+        self._lb_thread.start()
+
+    def _stop_lakibeam_capture(self):
+        self._lb_capturing = False
+        if self._lb_thread is not None:
+            self._lb_thread.join(timeout=3.0)
+            self._lb_thread = None
+        self.log(f"LakiBeam frames captured: {len(self._lb_frames)}")
+
+    def _build_lakibeam_frame(self, scan, angle_deg, install, max_range):
+        frame = scan_to_xy(scan)
+        dist = np.linalg.norm(frame[:, :2], axis=1)
+        frame = frame[dist <= max_range]
+        if frame.shape[0] == 0:
+            return np.empty((0, 3), dtype=np.float64)
+        frame = frame @ install.lidar_tilt_matrix().T
+        frame = install.mount_transform(frame)
+        frame[:, 1] += install.offset_y_m
+        frame[:, 2] += install.offset_z_m
+        frame = install.to_world(frame)
+        frame = frame @ rotation_matrix(install.turntable_axis, angle_deg).T
+        frame = frame @ install.tilt_matrix().T
+        return np.asarray(frame, dtype=np.float64)
+
+    def _merge_lakibeam(self, capture: ScanCapture):
+        if not self._lb_frames or not capture.angle_samples:
+            self.log("No LakiBeam data to merge")
+            return
+        try:
+            install = InstallConfig.load(self._install_config_path)
+        except Exception as exc:
+            self.log(f"Install config load failed ({exc}); using side_mount defaults")
+            install = InstallConfig.side_mount()
+        angle_times = np.array([s[0] for s in capture.angle_samples])
+        angle_values = np.array([s[1] for s in capture.angle_samples])
+        max_range = self._max_dist if self._max_dist is not None else 1.0e9
+        clouds = []
+        for stamp, scan in self._lb_frames:
+            angle_deg = np.interp(stamp, angle_times, angle_values)
+            if not (capture.scan_start_deg <= angle_deg <= capture.scan_end_deg):
+                continue
+            cloud = self._build_lakibeam_frame(scan, angle_deg, install, max_range)
+            if cloud.shape[0] > 0:
+                clouds.append(cloud)
+        if not clouds:
+            self.log("No LakiBeam frames in scan range")
+            return
+        merged = np.concatenate(clouds, axis=0)
+        out_path = os.path.join(capture.out_dir, "merged.ply")
+        self._save_ply(out_path, merged)
+        self.log(f"LakiBeam merged point cloud saved: {out_path}")
+        self.log(f"LakiBeam merged frames: {len(clouds)}, total points: {len(merged)}")
+
     def reset_to_ready(self, ready_deg: float = 90.0, sweep_speed: float = 40.0):
         self.log("=== Reset to 90 deg ===")
         self.log("1) Homing...")
@@ -494,6 +594,10 @@ class TurntableGuiController(Node):
         os.makedirs(self.out_dir, exist_ok=True)
         os.makedirs(os.path.join(self.out_dir, "frames"), exist_ok=True)
         self.log(f"Output directory for this scan: {self.out_dir}")
+
+        if self._lidar_kind == "lakibeam" and not self.open_lakibeam():
+            self.log("LakiBeam UDP not available")
+            return False
 
         if self.tt_status is not None and abs(self.tt_status.angle_deg - ready_deg) > 0.5:
             self.log(
@@ -584,14 +688,22 @@ class TurntableGuiController(Node):
     def _start_capture(self):
         self._angle_samples.clear()
         self._raw_frames.clear()
+        if self._lidar_kind == "lakibeam":
+            self._start_lakibeam_capture()
         self._capturing = True
         self.log("Capture started")
 
     def _stop_capture(self):
         self._capturing = False
+        if self._lidar_kind == "lakibeam":
+            self._stop_lakibeam_capture()
         self.log("Capture stopped")
 
     def _process_frames_and_merge(self, capture: ScanCapture):
+        if self._lidar_kind == "lakibeam":
+            self._merge_lakibeam(capture)
+            self.process_depth_cloud()
+            return
         captured_frames: list[tuple[float, np.ndarray]] = []
         if not self._no_fairy and capture.raw_frames:
             self.log(f"Processing {len(capture.raw_frames)} frames...")
@@ -725,7 +837,7 @@ class TurntableGuiController(Node):
             checks.append("Depth image: no data")
             ready = False
 
-        if self._no_fairy:
+        if self._no_fairy or self._lidar_kind == "lakibeam":
             checks.append("LiDAR: skipped")
         else:
             if self._fairy_msg_count > 0:
@@ -736,15 +848,16 @@ class TurntableGuiController(Node):
 
         return ready, "; ".join(checks)
 
-    def launch_sensor_env(self, timeout_s: float = 120.0) -> bool:
+    def launch_sensor_env(self, timeout_s: float = 120.0, use_fairy: bool = True) -> bool:
         proc = self._launch_proc
         if proc is None or proc.poll() is not None:
             self.reset_usb_cameras()
             time.sleep(2.0)
-            self.log(f"Starting background services: {SENSOR_ENV_LAUNCH}")
+            cmd = SENSOR_ENV_LAUNCH.split() + [f"use_fairy:={'true' if use_fairy else 'false'}"]
+            self.log(f"Starting background services: {' '.join(cmd)}")
             try:
                 proc = subprocess.Popen(
-                    SENSOR_ENV_LAUNCH.split(),
+                    cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -796,10 +909,10 @@ class TurntableGuiApp:
         self.font_normal = (self.font_name, 11)
 
         self._create_widgets()
+        node._lidar_kind = self._selected_lidar_kind()
         node.set_log_callback(self._log)
-        self._set_buttons(tk.DISABLED, tk.DISABLED)
-        self._update_status(False, "Checking background services...")
-        self._run_in_thread(self._startup_readiness_loop)
+        self._set_buttons(tk.DISABLED, tk.DISABLED, tk.NORMAL)
+        self._update_status(False, "Press 'Restart services' to start")
 
     def _create_widgets(self):
         title = tk.Label(self.root, text="Perception Tower Turntable Control", font=(self.font_name, 20))
@@ -840,6 +953,22 @@ class TurntableGuiApp:
         self.speed_entry.pack(side=tk.LEFT, padx=5)
         tk.Label(speed_frame, text="deg/s", font=self.font_normal).pack(side=tk.LEFT)
 
+        lidar_frame = tk.Frame(self.root)
+        lidar_frame.pack(pady=5)
+
+        tk.Label(lidar_frame, text="LiDAR:", font=self.font_normal).pack(side=tk.LEFT)
+        self.lidar_var = tk.StringVar(value="LakiBeam (UDP)")
+        self.lidar_combo = ttk.Combobox(
+            lidar_frame, textvariable=self.lidar_var, state="readonly", width=16,
+            values=["Fairy (ROS)", "LakiBeam (UDP)"], font=self.font_normal,
+        )
+        self.lidar_combo.pack(side=tk.LEFT, padx=5)
+        self.restart_btn = tk.Button(
+            lidar_frame, text="Restart services", font=self.font_normal,
+            command=self._on_restart_services, state=tk.DISABLED,
+        )
+        self.restart_btn.pack(side=tk.LEFT, padx=5)
+
         self.reset_btn = tk.Button(
             self.root, text="1. Reset to 90deg", font=self.font_large,
             width=25, height=2, command=self._on_reset, state=tk.DISABLED
@@ -861,22 +990,6 @@ class TurntableGuiApp:
         color = "green" if ready else "red"
         self.status_canvas.itemconfig(self.status_dot, fill=color)
         self.status_label.config(text=text)
-
-    def _startup_readiness_loop(self):
-        while True:
-            ready, detail = self.node.check_ready(self.color_topic, self.depth_topic, self.fairy_topic)
-            self.root.after(0, lambda d=detail: self._log(d))
-            if ready:
-                self.root.after(0, lambda: self._update_status(True, "READY"))
-                self.root.after(0, lambda: self._set_buttons(tk.NORMAL, tk.DISABLED))
-                self.root.after(0, lambda: self._log("Background services ready"))
-                return
-            self.root.after(0, lambda: self._update_status(False, "Not Ready - Starting background services..."))
-            if not self.node.launch_sensor_env(timeout_s=120.0):
-                self.root.after(0, lambda: self._update_status(False, "Background services failed"))
-                self.root.after(0, lambda: messagebox.showerror("Error", "Failed to start background services. Please check the environment and restart."))
-                return
-            time.sleep(1.0)
 
     def _log(self, msg: str):
         self.log_text.insert(tk.END, f"{msg}\n")
@@ -920,9 +1033,10 @@ class TurntableGuiApp:
                 self.root.after(0, lambda: self._log(f"Error: {e}"))
         threading.Thread(target=wrapper, daemon=True).start()
 
-    def _set_buttons(self, reset_state, scan_state):
+    def _set_buttons(self, reset_state, scan_state, restart_state=None):
         self.reset_btn.config(state=reset_state)
         self.scan_btn.config(state=scan_state)
+        self.restart_btn.config(state=scan_state if restart_state is None else restart_state)
 
     def _on_reset(self):
         speed = self._get_sweep_speed()
@@ -944,6 +1058,31 @@ class TurntableGuiApp:
             self._set_buttons(tk.NORMAL, tk.DISABLED)
             messagebox.showerror("Error", "Reset failed")
 
+    def _selected_lidar_kind(self) -> str:
+        return "lakibeam" if self.lidar_var.get().startswith("LakiBeam") else "fairy"
+
+    def _on_restart_services(self):
+        kind = self._selected_lidar_kind()
+        self._set_buttons(tk.DISABLED, tk.DISABLED)
+        self._run_in_thread(lambda: self._do_restart_services(kind))
+
+    def _do_restart_services(self, kind: str):
+        self.node._lidar_kind = kind
+        use_fairy = kind == "fairy"
+        ok = self.node.restart_sensor_env(use_fairy=use_fairy)
+        if ok:
+            _, detail = self.node.check_ready(self.color_topic, self.depth_topic, self.fairy_topic)
+            self.root.after(0, lambda d=detail: self._log(d))
+        self.root.after(0, lambda: self._after_restart_services(ok, use_fairy))
+
+    def _after_restart_services(self, ok: bool, use_fairy: bool):
+        self._set_buttons(tk.NORMAL, tk.DISABLED, tk.NORMAL)
+        if ok:
+            self._update_status(True, "READY")
+            self._log(f"Services restarted (fairy={'on' if use_fairy else 'off'})")
+        else:
+            messagebox.showerror("Error", "Restart services failed")
+
     def _on_scan(self):
         scan_range = self._get_scan_range()
         if scan_range is None:
@@ -956,6 +1095,7 @@ class TurntableGuiApp:
             return
         self.sweep_speed = speed
         self.node._max_dist = max_dist
+        self.node._lidar_kind = self._selected_lidar_kind()
         self._set_buttons(tk.DISABLED, tk.DISABLED)
         self._run_in_thread(lambda: self._do_scan(scan_range))
 
@@ -994,12 +1134,17 @@ def main():
     parser.add_argument("--no-fairy", action="store_true", help="Skip LiDAR capture")
     parser.add_argument("--rotation-axis", type=float, nargs=3, default=[1.0, 0.0, 0.0],
                         help="Merge rotation axis")
+    parser.add_argument("--lakibeam-port", type=int, default=2368, help="LakiBeam UDP port")
+    parser.add_argument("--install-config", default="config/install_side_mount.yaml",
+                        help="LakiBeam install config YAML")
     args = parser.parse_args()
 
     config = {
         "no_fairy": args.no_fairy,
         "rotation_axis": list(args.rotation_axis),
         "depth_cloud_topic": args.depth_cloud_topic,
+        "lakibeam_port": args.lakibeam_port,
+        "install_config": args.install_config,
     }
 
     rclpy.init()
