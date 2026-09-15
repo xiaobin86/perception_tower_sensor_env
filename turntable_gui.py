@@ -1055,7 +1055,7 @@ class TurntableGuiApp:
             self._set_buttons(tk.NORMAL, tk.NORMAL)
             self._log("Reset complete. Set scan range and click Start Scan.")
         else:
-            self._set_buttons(tk.NORMAL, tk.DISABLED)
+            self._set_buttons(tk.NORMAL, tk.DISABLED, tk.NORMAL)
             messagebox.showerror("Error", "Reset failed")
 
     def _selected_lidar_kind(self) -> str:
