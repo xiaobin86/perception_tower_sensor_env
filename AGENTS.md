@@ -67,13 +67,28 @@ Outputs: `cropped_3m_20deg_board.ply`, `view_board.png`.
 `calibrate_camera_lidar.py POSE_DIR [POSE_DIR ...]` — each `POSE_DIR` holds `color.png` + `merged.ply`
 (the merged cloud must be referenced to the photo angle, see gotchas). Per pose it does:
 
-1. image → `findChessboardCorners(4,6)` + `cornerSubPix` → `solvePnP(SOLVEPNP_IPPE)` → camera plane `(n_c, d_c)`;
-2. cloud → ROI crop → height filter → RANSAC largest plane → LiDAR plane `(n_l, d_l)`;
-3. over all poses solve `n_c = R·n_l` (Kabsch/SVD) and `d_c − d_l = n_c·t` (least squares).
+1. image → multi-strategy checkerboard detection (adaptive-threshold window variants / Otsu / B-G
+   channel, both 4×6 and 6×4) + `cornerSubPix` → `solvePnP(SOLVEPNP_IPPE)` → camera plane `(n_c, d_c)`;
+2. cloud → remove the floor plane (RANSAC largest near-horizontal plane) + drop self-returns (<0.25 m)
+   → RANSAC search for the board plane (iterating large non-board planes away) → keep the largest
+   connected component of the plane inliers → trim to the known 0.60×0.84 m board window → `(n_l, d_l)`;
+3. over all poses solve `n_c = R·n_l` (Kabsch/SVD) and `t` from board-center differences; then one
+   image-guided refinement pass (project the LiDAR inliers into the photo, keep those inside the board quad).
 
-Constraints: **R needs ≥2 non-parallel board planes, t needs ≥3** (one plane only fixes 3 of 6 DOF).
+Constraints: **R needs ≥2 non-parallel board planes, t needs ≥3** (one plane fixes 3 of 6 DOF).
 Intrinsics from `config/camera_info.yaml`; board is 4×6 inner corners, 120 mm squares.
-Output: `config/camera_extrinsics.yaml` (`p_camera = R·p_lidar + t`, merged-frame LiDAR).
+
+Calibration datasets live in `turntable_output/calib_*` (the `calib_` prefix marks them; other timestamp
+directories are ad-hoc scans). Official extrinsics:
+
+    ./run_calibration.sh    # 用所有 turntable_output/calib_* 重算 -> config/camera_extrinsics.yaml
+
+Pose diversity beats pose count: boards should be **tilted** (pitch ±20…45°) and spread in azimuth.
+All-upright boards leave the camera pitch/roll weakly observable (measured plane normals stay nearly
+coplanar) and their incidence-angle bias does not self-correct, so an upright-only fit can look
+self-consistent (~1°) yet be several degrees off; mixing many upright poses into a joint fit degrades it.
+Judge candidate extrinsics against the depth cloud (independent sensor) — board-plane RMS alone is
+misleading.
 
 ## Existing helper scripts
 
@@ -83,6 +98,16 @@ Output: `config/camera_extrinsics.yaml` (`p_camera = R·p_lidar + t`, merged-fra
 - `visualize_ply.py` — point cloud viewer.
 - `crop_pointcloud.py` — crop by distance + horizontal angular wedge (see conventions above).
 - `calibrate_camera_lidar.py` — automatic checkerboard camera-LiDAR calibration (see above).
+- `run_calibration.sh` — recompute the official extrinsics from every `turntable_output/calib_*` into
+  `config/camera_extrinsics.yaml`.
 - `colorize_pointcloud.py` — project `merged.ply` onto `color.png` and write an RGB `colored.ply`
   (nearest-neighbour pixel sampling; points outside the image stay gray). `turntable_gui.py` calls it
-  automatically after each scan merge when `config/camera_extrinsics.yaml` exists.
+  automatically after each scan merge when `config/camera_extrinsics.yaml` exists (both the LakiBeam and
+  the Fairy path; photo angle = `(scan_start + scan_end) / 2`).
+
+## Scan range filter (turntable_gui)
+
+`Range (min, max)` in the GUI (or `--min-dist` / `--max-dist`, default `0.2, 3.0` m) drops merged points
+outside `min < r ≤ max`; it applies to the LakiBeam merge, the Fairy merge and the depth-cloud crop.
+Separator is the half-width comma only. `min = 0.2 m` removes the LiDAR's near-field self-returns
+(mount/bracket at ~5 cm) that otherwise dominate the merged cloud.

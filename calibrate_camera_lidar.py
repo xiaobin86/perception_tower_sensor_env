@@ -2,12 +2,12 @@
 """Camera-LiDAR extrinsic calibration from a planar checkerboard.
 
 Each pose directory must contain `color.png` and `merged.ply`. See AGENTS.md for the
-coordinate frame and ROI conventions.
+coordinate frame conventions.
 
 Pipeline per pose:
     image  -> findChessboardCorners(4x6) -> solvePnP -> camera plane (n_c, d_c)
-    cloud  -> ROI crop -> height filter -> RANSAC largest plane -> LiDAR plane (n_l, d_l)
-Then:  n_c = R n_l   and   d_c - d_l = n_c · t   solved over all poses.
+    cloud  -> remove ground -> search board-like plane -> LiDAR plane (n_l, d_l)
+Then:  n_c = R n_l   and   t from board centers, solved over all poses.
 
 Usage:
     python3 calibrate_camera_lidar.py POSE_DIR [POSE_DIR ...] [--camera-info config/camera_info.yaml]
@@ -27,10 +27,13 @@ import yaml
 SQUARE_SIZE_M = 0.12
 BOARD_COLS = 4
 BOARD_ROWS = 6
-ROI_MAX_DIST_M = 3.0
-ROI_HALF_ANGLE_DEG = 20.0
-HEIGHT_MIN_M = 0.4
-HEIGHT_MAX_M = 2.6
+BOARD_WIDTH_M = 0.60
+BOARD_HEIGHT_M = 0.84
+BOARD_TRIM_TOL_M = 0.05
+GROUND_MAX_TILT_COS = 0.96
+GROUND_MIN_SPAN_M = 1.2
+GROUND_SLAB_M = 0.05
+SELF_RETURN_RADIUS_M = 0.25
 PLANE_INLIER_M = 0.02
 
 
@@ -92,8 +95,9 @@ def write_ply_xyz(path: str, points: np.ndarray) -> None:
 
 def fit_plane_svd(points: np.ndarray) -> Plane:
     centroid = points.mean(axis=0)
-    _, _, vt = np.linalg.svd(points - centroid)
-    normal = vt[-1]
+    cov = (points - centroid).T @ (points - centroid)
+    _, vecs = np.linalg.eigh(cov)
+    normal = vecs[:, 0]
     offset = float(normal @ centroid)
     if offset < 0.0:
         normal, offset = -normal, -offset
@@ -120,44 +124,122 @@ def ransac_plane(points: np.ndarray, rng: np.random.Generator,
     return fit_plane_svd(inliers)
 
 
-def crop_roi(points: np.ndarray, max_dist: float, half_angle_deg: float) -> np.ndarray:
-    radius = np.linalg.norm(points, axis=1)
-    theta = np.degrees(np.arctan2(points[:, 1], -points[:, 0]))
-    keep = (radius < max_dist) & (np.abs(theta) < half_angle_deg)
-    return points[keep]
+def find_ground_plane(points: np.ndarray, rng: np.random.Generator,
+                      rounds: int = 6, iters: int = 1500, threshold: float = 0.03,
+                      sample_max: int = 60000) -> Plane:
+    """RANSAC 迭代找大面积近水平平面（地板），不依赖 z 轴朝向；不合格的大平面先剔除。"""
+    rest = points
+    for _ in range(rounds):
+        if len(rest) < 1000:
+            break
+        sample = rest
+        if len(rest) > sample_max:
+            sample = rest[rng.choice(len(rest), sample_max, replace=False)]
+        best = None
+        for _ in range(iters):
+            a, b, c = sample[rng.choice(len(sample), 3, replace=False)]
+            normal = np.cross(b - a, c - a)
+            norm = np.linalg.norm(normal)
+            if norm < 1e-9:
+                continue
+            normal /= norm
+            if abs(normal[2]) < GROUND_MAX_TILT_COS:
+                continue
+            offset = float(normal @ a)
+            count = int((np.abs(sample @ normal - offset) < threshold).sum())
+            if best is None or count > best[0]:
+                best = (count, normal, offset)
+        if best is None:
+            break
+        _, normal, offset = best
+        inliers = rest[np.abs(rest @ normal - offset) < threshold]
+        spans = _plane_spans(inliers)
+        if spans[1] >= GROUND_MIN_SPAN_M and spans[2] >= GROUND_MIN_SPAN_M:
+            return fit_plane_svd(inliers)
+        rest = rest[np.abs(rest @ normal - offset) >= threshold]
+    raise ValueError("no large horizontal plane found")
 
 
-def detect_ground_z(points: np.ndarray, bins: int = 200) -> float:
-    counts, edges = np.histogram(points[:, 2], bins=bins)
-    peak = int(np.argmax(counts))
-    return float((edges[peak] + edges[peak + 1]) / 2.0)
+def _plane_spans(inliers: np.ndarray) -> np.ndarray:
+    c = inliers.mean(axis=0)
+    cov = (inliers - c).T @ (inliers - c)
+    _, vecs = np.linalg.eigh(cov)
+    spans = []
+    for k in range(3):
+        proj = (inliers - c) @ vecs[:, k]
+        spans.append(proj.max() - proj.min())
+    return np.sort(spans)
+
+
+def _is_board_plane(inliers: np.ndarray, normal: np.ndarray) -> bool:
+    if len(inliers) < 300 or abs(normal[2]) > 0.85:
+        return False
+    s = _plane_spans(inliers)
+    return bool(s[0] < 0.30 and 0.30 < s[1] < 1.20 and 0.45 < s[2] < 3.00)
+
+
+def search_board_plane(points: np.ndarray, rng: np.random.Generator,
+                       rounds: int = 8) -> tuple[Plane, np.ndarray]:
+    rest = points
+    for _ in range(rounds):
+        if len(rest) < 500:
+            break
+        plane = ransac_plane(rest, rng)
+        inliers = rest[np.abs(rest @ plane.normal - plane.offset) < PLANE_INLIER_M]
+        if _is_board_plane(inliers, plane.normal):
+            return plane, inliers
+        keep = np.abs(rest @ plane.normal - plane.offset) >= PLANE_INLIER_M
+        if keep.sum() < 500:
+            break
+        rest = rest[keep]
+    raise ValueError("no board-like vertical plane found")
 
 
 def extract_lidar_board(points: np.ndarray, rng: np.random.Generator,
                         out_dir: str) -> tuple[Plane, np.ndarray]:
-    roi = crop_roi(points, ROI_MAX_DIST_M, ROI_HALF_ANGLE_DEG)
-    write_ply_xyz(os.path.join(out_dir, "dbg_1_roi.ply"), roi)
-    ground_z = detect_ground_z(roi)
-    height = roi[:, 2] - ground_z
-    band = roi[(height > HEIGHT_MIN_M) & (height < HEIGHT_MAX_M)]
-    write_ply_xyz(os.path.join(out_dir, "dbg_2_height.ply"), band)
-    if len(band) < 100:
-        raise ValueError("too few points after ROI/height filtering")
-    plane = ransac_plane(band, rng)
-    inliers = band[np.abs(band @ plane.normal - plane.offset) < PLANE_INLIER_M]
+    ground = find_ground_plane(points, rng)
+    radius = np.linalg.norm(points, axis=1)
+    scene = points[(np.abs(points @ ground.normal - ground.offset) > GROUND_SLAB_M)
+                   & (radius > SELF_RETURN_RADIUS_M)]
+    write_ply_xyz(os.path.join(out_dir, "dbg_2_no_ground.ply"), scene)
+    plane, inliers = search_board_plane(scene, rng)
+    rough = fit_plane_svd(inliers)
+    comp = largest_component_mask(inliers, rough.normal)
+    if comp is not None and int(comp.sum()) >= 200:
+        inliers = inliers[comp]
+        plane = fit_plane_svd(inliers)
     write_ply_xyz(os.path.join(out_dir, "dbg_3_plane.ply"), inliers)
     return plane, inliers
 
 
-def find_board_corners(gray: np.ndarray) -> np.ndarray:
+def find_board_corners(image: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    patterns = [(BOARD_COLS, BOARD_ROWS), (BOARD_ROWS, BOARD_COLS)]
     flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
-    found, corners = cv2.findChessboardCorners(gray, (BOARD_COLS, BOARD_ROWS), flags=flags)
-    if found:
-        return corners
-    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 10)
-    found, corners = cv2.findChessboardCornersSB(thresh, (BOARD_COLS, BOARD_ROWS))
-    if found:
-        return corners
+    for pat in patterns:
+        found, corners = cv2.findChessboardCorners(gray, pat, flags)
+        if found:
+            return corners
+    # 暖色低对比度印刷会击穿自适应阈值，需要多组窗口大小；Otsu 与 B/G 通道作为补充
+    thresh_variants = [
+        cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                              cv2.THRESH_BINARY, block, c)
+        for block, c in ((21, 10), (21, 5), (31, 7), (31, 10), (41, 7), (41, 5))
+    ] + [
+        cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+        cv2.threshold(image[:, :, 0], 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+        cv2.threshold(image[:, :, 1], 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+    ]
+    for th in thresh_variants:
+        for pat in patterns:
+            found, corners = cv2.findChessboardCornersSB(th, pat)
+            if found:
+                return corners
+    up = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    for pat in patterns:
+        found, corners = cv2.findChessboardCorners(up, pat, flags)
+        if found:
+            return corners / 2.0
     raise ValueError(f"checkerboard ({BOARD_COLS}x{BOARD_ROWS} inner corners) not found")
 
 
@@ -165,7 +247,7 @@ def detect_camera_plane(image: np.ndarray, K: np.ndarray, dist: np.ndarray
                         ) -> tuple[Plane, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     corners = cv2.cornerSubPix(
-        gray, find_board_corners(gray), (5, 5), (-1, -1),
+        gray, find_board_corners(image), (5, 5), (-1, -1),
         (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001),
     )
     object_points = board_object_points()
@@ -181,10 +263,10 @@ def detect_camera_plane(image: np.ndarray, K: np.ndarray, dist: np.ndarray
     board_center = R @ np.array([(BOARD_COLS - 1) / 2 * SQUARE_SIZE_M,
                                  (BOARD_ROWS - 1) / 2 * SQUARE_SIZE_M, 0.0]) + t
     paper = np.array([
-        [-0.5 * SQUARE_SIZE_M, -0.5 * SQUARE_SIZE_M, 0.0],
-        [(BOARD_COLS - 0.5) * SQUARE_SIZE_M, -0.5 * SQUARE_SIZE_M, 0.0],
-        [(BOARD_COLS - 0.5) * SQUARE_SIZE_M, (BOARD_ROWS - 0.5) * SQUARE_SIZE_M, 0.0],
-        [-0.5 * SQUARE_SIZE_M, (BOARD_ROWS - 0.5) * SQUARE_SIZE_M, 0.0],
+        [-SQUARE_SIZE_M, -SQUARE_SIZE_M, 0.0],
+        [BOARD_COLS * SQUARE_SIZE_M, -SQUARE_SIZE_M, 0.0],
+        [BOARD_COLS * SQUARE_SIZE_M, BOARD_ROWS * SQUARE_SIZE_M, 0.0],
+        [-SQUARE_SIZE_M, BOARD_ROWS * SQUARE_SIZE_M, 0.0],
     ])
     polygon, _ = cv2.projectPoints(paper, rvec, tvec, K, dist)
     return (Plane(normal, offset), corners.reshape(-1, 2), -R[:, 1], board_center,
@@ -217,7 +299,7 @@ def process_pose(pose_dir: str, K: np.ndarray, dist: np.ndarray,
         lidar_plane = Plane(Rz @ lidar_plane.normal, lidar_plane.offset)
         inliers = inliers @ Rz.T
     return PoseObs(os.path.basename(pose_dir.rstrip("/")), pose_dir, camera_plane, lidar_plane,
-                   image, image_points, inliers, up_cam, center_cam, inliers.mean(axis=0), board_polygon)
+                   image, image_points, inliers, up_cam, center_cam, np.median(inliers, axis=0), board_polygon)
 
 
 def draw_validation(obs: PoseObs, R: np.ndarray, t: np.ndarray,
@@ -251,6 +333,72 @@ def normals_residual(obses: list[PoseObs], R: np.ndarray) -> np.ndarray:
     return np.degrees(np.arccos(np.clip(np.sum((R @ lidar_normals.T).T * camera_normals, axis=1), -1, 1)))
 
 
+def largest_component_mask(inliers: np.ndarray, normal: np.ndarray,
+                           cell: float = 0.02) -> np.ndarray | None:
+    """板面 2D 占据图上只保留最大连通域，去掉不连通的碎片（支架/后方架子）。"""
+    c = inliers.mean(axis=0)
+    cov = (inliers - c).T @ (inliers - c)
+    _, vecs = np.linalg.eigh(cov)
+    e1, e2 = vecs[:, 1], vecs[:, 2]
+    u = (inliers - c) @ e1
+    v = (inliers - c) @ e2
+    iu = np.floor((u - u.min()) / cell).astype(np.int32)
+    iv = np.floor((v - v.min()) / cell).astype(np.int32)
+    img = np.zeros((iv.max() + 1, iu.max() + 1), np.uint8)
+    img[iv, iu] = 1
+    closed = cv2.morphologyEx(img, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(closed, connectivity=8)
+    if count <= 2:
+        return None
+    largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    return labels[iv, iu] == largest
+
+
+def board_window_mask(inliers: np.ndarray, normal: np.ndarray,
+                      width: float = BOARD_WIDTH_M, height: float = BOARD_HEIGHT_M,
+                      tol: float = BOARD_TRIM_TOL_M) -> np.ndarray | None:
+    """按已知板尺寸的矩形窗口裁掉板外的直线延展（支架/后方架子）；上边缘由密度剖面确定。"""
+    up = np.array([0.0, 0.0, 1.0])
+    if abs(float(normal @ up)) > 0.9:
+        up = np.array([0.0, 1.0, 0.0])
+    v_base = up - (up @ normal) * normal
+    norm = np.linalg.norm(v_base)
+    if norm < 1e-6:
+        return None
+    v_base /= norm
+    u_base = np.cross(normal, v_base)
+    d = inliers - inliers.mean(axis=0)
+    best_keep, best_count = None, -1
+    for angle in np.arange(-40.0, 40.1, 5.0):
+        rad = np.radians(angle)
+        u_dir = np.cos(rad) * u_base + np.sin(rad) * v_base
+        v_dir = -np.sin(rad) * u_base + np.cos(rad) * v_base
+        u = d @ u_dir
+        v = d @ v_dir
+        edges = np.arange(v.min(), v.max() + 0.02, 0.02)
+        if len(edges) < 4:
+            continue
+        hist, _ = np.histogram(v, bins=edges)
+        dense = hist > 0.3 * hist.max()
+        peak = int(np.argmax(hist))
+        top = peak
+        while top < len(dense) - 1 and dense[top + 1]:
+            top += 1
+        bottom = peak
+        while bottom > 0 and dense[bottom - 1]:
+            bottom -= 1
+        v_top = float(edges[top + 1])
+        v_body = v[(v > float(edges[bottom])) & (v < v_top)]
+        if len(v_body) < 100:
+            continue
+        u_mid = float(np.median(u[(v > v_top - height) & (v < v_top)]))
+        keep = ((np.abs(u - u_mid) < width / 2.0 + tol)
+                & (v > v_top - height - tol) & (v < v_top + tol))
+        if int(keep.sum()) > best_count:
+            best_count, best_keep = int(keep.sum()), keep
+    return best_keep
+
+
 def refine_pose_plane(obs: PoseObs, R: np.ndarray, t: np.ndarray, K: np.ndarray,
                       dist: np.ndarray, margin_px: float = 12.0) -> PoseObs:
     rvec, _ = cv2.Rodrigues(R)
@@ -260,12 +408,20 @@ def refine_pose_plane(obs: PoseObs, R: np.ndarray, t: np.ndarray, K: np.ndarray,
     keep = np.array([cv2.pointPolygonTest(polygon, (float(u), float(v)), True) >= -margin_px
                      for u, v in projected])
     kept = obs.lidar_inliers[keep]
+    if len(kept) >= 200:
+        rough = fit_plane_svd(kept)
+        comp = largest_component_mask(kept, rough.normal)
+        if comp is not None and int(comp.sum()) >= 200:
+            kept = kept[comp]
+        window = board_window_mask(kept, rough.normal)
+        if window is not None and int(window.sum()) >= 200:
+            kept = kept[window]
     write_ply_xyz(os.path.join(obs.pose_dir, "dbg_4_board_selected.ply"), kept)
     if len(kept) < 50:
         print(f"  {obs.name}: camera selection kept too few points ({len(kept)}); keeping raw plane")
         return obs
     return replace(obs, lidar_plane=fit_plane_svd(kept), lidar_inliers=kept,
-                   center_lidar=kept.mean(axis=0))
+                   center_lidar=np.median(kept, axis=0))
 
 
 def report_and_solve(obses: list[PoseObs], K: np.ndarray, dist: np.ndarray, out_path: str) -> int:
@@ -276,9 +432,6 @@ def report_and_solve(obses: list[PoseObs], K: np.ndarray, dist: np.ndarray, out_
               f"| inliers={len(obs.lidar_inliers)}")
 
     R, t = solve_all(obses)
-    raw_err = normals_residual(obses, R)
-    print(f"[raw]     normal angle error (deg): {raw_err.round(3).tolist()} rms={np.sqrt((raw_err**2).mean()):.3f}")
-
     refined = [refine_pose_plane(o, R, t, K, dist) for o in obses]
     R, t = solve_all(refined)
     err = normals_residual(refined, R)

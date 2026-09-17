@@ -34,6 +34,7 @@ ORBBEC_USB_VENDOR_ID = "2bc5"
 USBDEVFS_RESET_IOCTL = 0x5514
 MIDDLE_12_RINGS = tuple(range(42, 43))
 FAST_MOVE_DURATION_S = 0.2
+MIN_RANGE_M = 0.20
 
 from perception_tower_sensor_interfaces.srv import TurntableCommand
 from perception_tower_sensor_interfaces.msg import TurntableStatus
@@ -47,6 +48,33 @@ except ImportError:
     HAS_TKINTER = False
     print("Error: tkinter is not installed")
     sys.exit(1)
+
+
+def list_serial_ports() -> list[str]:
+    """枚举本机 USB 串口，返回下拉标签 "设备路径 — 描述"。
+
+    优先用 pyserial 的 list_ports（能拿到描述）；不可用时回退到
+    glob /dev/ttyUSB* 与 /dev/ttyACM*。注意 devcontainer 的 /dev 是
+    私有 tmpfs，插拔后重新枚举的设备不会出现，此时返回空列表。
+    """
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        import glob
+        return sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*"))
+    labels: list[str] = []
+    for info in sorted(list_ports.comports(), key=lambda i: i.device):
+        if info.vid is None and not info.device.startswith(("/dev/ttyUSB", "/dev/ttyACM")):
+            continue
+        desc = (info.description or "").strip()
+        labels.append(f"{info.device} — {desc}" if desc and desc != "n/a" else info.device)
+    return labels
+
+
+def port_from_label(label: str) -> str:
+    """从下拉标签取回设备路径；允许手输，标签首段即路径。"""
+    parts = label.strip().split()
+    return parts[0] if parts else ""
 
 
 def rotation_matrix_x(deg: float) -> np.ndarray:
@@ -106,10 +134,12 @@ class TurntableGuiController(Node):
         self._executor: MultiThreadedExecutor | None = None
         self._no_fairy = config.get("no_fairy", False)
         self._rotation_axis = np.array(config.get("rotation_axis", [1.0, 0.0, 0.0]), dtype=np.float64)
-        self._max_dist: float = 3.0
+        self._min_dist: float = float(config.get("min_dist", MIN_RANGE_M))
+        self._max_dist: float = float(config.get("max_dist", 3.0))
         self._lidar_kind = config.get("lidar_kind", "fairy")
         self._lakibeam_port = int(config.get("lakibeam_port", 2368))
         self._install_config_path = config.get("install_config", "config/install_side_mount.yaml")
+        self._turntable_port = str(config.get("turntable_port", "/dev/ttyUSB0"))
         self._lakibeam: LakiBeamViewer | None = None
         self._lb_frames: list[tuple[float, list[ScanPoint]]] = []
         self._lb_thread: threading.Thread | None = None
@@ -448,7 +478,8 @@ class TurntableGuiController(Node):
             return
         max_dist = self._max_dist
         if max_dist is not None:
-            xyz = xyz[np.linalg.norm(xyz, axis=1) < max_dist]
+            rng = np.linalg.norm(xyz, axis=1)
+            xyz = xyz[(rng > self._min_dist) & (rng < max_dist)]
         path = os.path.join(self.out_dir, "depth_cloud_cropped.ply")
         self._save_ply(path, xyz)
         self.log(f"Depth point cloud cropped: {path} ({len(xyz)} points, max_dist={max_dist})")
@@ -516,10 +547,10 @@ class TurntableGuiController(Node):
             self._lb_thread = None
         self.log(f"LakiBeam frames captured: {len(self._lb_frames)}")
 
-    def _build_lakibeam_frame(self, scan, angle_deg, install, max_range):
+    def _build_lakibeam_frame(self, scan, angle_deg, install, min_range, max_range):
         frame = scan_to_xy(scan)
         dist = np.linalg.norm(frame[:, :2], axis=1)
-        frame = frame[dist <= max_range]
+        frame = frame[(dist > min_range) & (dist <= max_range)]
         if frame.shape[0] == 0:
             return np.empty((0, 3), dtype=np.float64)
         frame = frame @ install.lidar_tilt_matrix().T
@@ -527,7 +558,7 @@ class TurntableGuiController(Node):
         frame[:, 1] += install.offset_y_m
         frame[:, 2] += install.offset_z_m
         frame = install.to_world(frame)
-        frame = frame @ rotation_matrix(install.turntable_axis, angle_deg).T
+        frame = frame @ rotation_matrix(install.turntable_axis, -angle_deg).T
         frame = frame @ install.tilt_matrix().T
         return np.asarray(frame, dtype=np.float64)
 
@@ -543,12 +574,16 @@ class TurntableGuiController(Node):
         angle_times = np.array([s[0] for s in capture.angle_samples])
         angle_values = np.array([s[1] for s in capture.angle_samples])
         max_range = self._max_dist if self._max_dist is not None else 1.0e9
+        min_range = self._min_dist if self._min_dist is not None else 0.0
+        self._log_frame_angles(
+            [(stamp, len(scan)) for stamp, scan in self._lb_frames], capture, "LakiBeam"
+        )
         clouds = []
         for stamp, scan in self._lb_frames:
             angle_deg = np.interp(stamp, angle_times, angle_values)
             if not (capture.scan_start_deg <= angle_deg <= capture.scan_end_deg):
                 continue
-            cloud = self._build_lakibeam_frame(scan, angle_deg, install, max_range)
+            cloud = self._build_lakibeam_frame(scan, angle_deg, install, min_range, max_range)
             if cloud.shape[0] > 0:
                 clouds.append(cloud)
         if not clouds:
@@ -703,6 +738,8 @@ class TurntableGuiController(Node):
         if self._lidar_kind == "lakibeam":
             self._merge_lakibeam(capture)
             self.process_depth_cloud()
+            photo_angle = (capture.scan_start_deg + capture.scan_end_deg) / 2.0
+            self._colorize_merged(capture.out_dir, photo_angle)
             return
         captured_frames: list[tuple[float, np.ndarray]] = []
         if not self._no_fairy and capture.raw_frames:
@@ -719,6 +756,31 @@ class TurntableGuiController(Node):
         self.stitch_and_save_merged(captured_frames, capture)
         self.process_depth_cloud()
 
+    def _log_frame_angles(
+        self,
+        frames: list[tuple[float, int]],
+        capture: ScanCapture,
+        label: str,
+    ) -> None:
+        """把采集到的每帧（相对时间、点数、插值角度、是否在扫描范围内）打到日志。"""
+        if not frames:
+            self.log(f"{label}: no frames captured")
+            return
+        if not capture.angle_samples:
+            self.log(f"{label}: {len(frames)} frames captured, but no angle samples")
+            return
+        angle_times = np.array([s[0] for s in capture.angle_samples])
+        angle_values = np.array([s[1] for s in capture.angle_samples])
+        t0 = frames[0][0]
+        self.log(
+            f"{label} frames ({len(frames)}), scan range "
+            f"[{capture.scan_start_deg:.1f}, {capture.scan_end_deg:.1f}] deg:"
+        )
+        for i, (stamp, n_pts) in enumerate(frames):
+            angle_deg = float(np.interp(stamp, angle_times, angle_values))
+            skip = "" if capture.scan_start_deg <= angle_deg <= capture.scan_end_deg else "  SKIP: out of range"
+            self.log(f"  {i:03d}  t+{stamp - t0:6.3f}s  {n_pts:6d} pts  angle={angle_deg:8.2f} deg{skip}")
+
     def stitch_and_save_merged(
         self,
         captured_frames: list[tuple[float, np.ndarray]],
@@ -734,6 +796,9 @@ class TurntableGuiController(Node):
         keep = list(MIDDLE_12_RINGS)
         max_dist = self._max_dist
         self.log(f"Merging rings {keep[0]}-{keep[-1]}, max_dist={max_dist}")
+        self._log_frame_angles(
+            [(stamp, len(data)) for stamp, data in captured_frames], capture, "Fairy"
+        )
 
         all_points = []
         for frame_stamp, frame_data in captured_frames:
@@ -745,7 +810,8 @@ class TurntableGuiController(Node):
             valid = np.isfinite(xyz).all(axis=1)
             frame_xyz = xyz[valid & np.isin(rings, keep)]
             if max_dist is not None:
-                frame_xyz = frame_xyz[np.linalg.norm(frame_xyz, axis=1) < max_dist]
+                rng = np.linalg.norm(frame_xyz, axis=1)
+                frame_xyz = frame_xyz[(rng > self._min_dist) & (rng < max_dist)]
             transformed = transform_frame(frame_xyz, angle_deg, axis)
             all_points.append(transformed)
 
@@ -848,12 +914,18 @@ class TurntableGuiController(Node):
 
         return ready, "; ".join(checks)
 
-    def launch_sensor_env(self, timeout_s: float = 120.0, use_fairy: bool = True) -> bool:
+    def launch_sensor_env(self, timeout_s: float = 120.0, use_fairy: bool = True,
+                          turntable_port: str | None = None) -> bool:
+        if turntable_port:
+            self._turntable_port = turntable_port
         proc = self._launch_proc
         if proc is None or proc.poll() is not None:
             self.reset_usb_cameras()
             time.sleep(2.0)
-            cmd = SENSOR_ENV_LAUNCH.split() + [f"use_fairy:={'true' if use_fairy else 'false'}"]
+            cmd = SENSOR_ENV_LAUNCH.split() + [
+                f"use_fairy:={'true' if use_fairy else 'false'}",
+                f"turntable_port:={self._turntable_port}",
+            ]
             self.log(f"Starting background services: {' '.join(cmd)}")
             try:
                 proc = subprocess.Popen(
@@ -938,9 +1010,9 @@ class TurntableGuiApp:
         dist_frame = tk.Frame(self.root)
         dist_frame.pack(pady=5)
 
-        tk.Label(dist_frame, text="Max distance:", font=self.font_normal).pack(side=tk.LEFT)
-        self.dist_var = tk.StringVar(value="3.0")
-        self.dist_entry = tk.Entry(dist_frame, textvariable=self.dist_var, width=8, font=self.font_normal)
+        tk.Label(dist_frame, text="Range (min, max):", font=self.font_normal).pack(side=tk.LEFT)
+        self.dist_var = tk.StringVar(value=f"{self.node._min_dist:g}, {self.node._max_dist:g}")
+        self.dist_entry = tk.Entry(dist_frame, textvariable=self.dist_var, width=14, font=self.font_normal)
         self.dist_entry.pack(side=tk.LEFT, padx=5)
         tk.Label(dist_frame, text="m", font=self.font_normal).pack(side=tk.LEFT)
 
@@ -969,6 +1041,28 @@ class TurntableGuiApp:
         )
         self.restart_btn.pack(side=tk.LEFT, padx=5)
 
+        port_frame = tk.Frame(self.root)
+        port_frame.pack(pady=5)
+
+        tk.Label(port_frame, text="Turntable port:", font=self.font_normal).pack(side=tk.LEFT)
+        ports = list_serial_ports()
+        if ports:
+            initial_port = next((v for v in ports if port_from_label(v) == self.node._turntable_port), ports[0])
+        else:
+            initial_port = self.node._turntable_port
+        self.port_var = tk.StringVar(value=initial_port)
+        self.port_combo = ttk.Combobox(
+            port_frame, textvariable=self.port_var, width=30,
+            values=ports, font=self.font_normal,
+        )
+        self.port_combo.pack(side=tk.LEFT, padx=5)
+        self.port_combo.bind("<<ComboboxSelected>>", self._on_port_selected)
+        self.port_combo.bind("<FocusOut>", self._on_port_selected)
+        tk.Button(
+            port_frame, text="Refresh", font=self.font_normal,
+            command=self._on_refresh_ports,
+        ).pack(side=tk.LEFT)
+
         self.reset_btn = tk.Button(
             self.root, text="1. Reset to 90deg", font=self.font_large,
             width=25, height=2, command=self._on_reset, state=tk.DISABLED
@@ -985,6 +1079,11 @@ class TurntableGuiApp:
             self.root, wrap=tk.WORD, width=80, height=14, font=("Consolas", 10)
         )
         self.log_text.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+
+        if not ports:
+            self._log("No USB serial ports found. If the adapter was plugged in after the "
+                      "container started, restart the dev container (its /dev is a private "
+                      "tmpfs and misses re-enumerated devices).")
 
     def _update_status(self, ready: bool, text: str):
         color = "green" if ready else "red"
@@ -1005,14 +1104,17 @@ class TurntableGuiApp:
             messagebox.showerror("Error", f"Invalid scan range: {e}")
             return None
 
-    def _get_max_dist(self) -> float | None:
+    def _get_range(self) -> tuple[float, float] | None:
+        parts = [p.strip() for p in self.dist_var.get().split(",")]
         try:
-            value = float(self.dist_var.get())
-            if value <= 0:
-                raise ValueError("must be positive")
-            return value
+            if len(parts) != 2:
+                raise ValueError("格式为 min,max（半角逗号分隔）")
+            low, high = float(parts[0]), float(parts[1])
+            if low < 0 or high <= low:
+                raise ValueError("需满足 0 <= min < max")
+            return low, high
         except ValueError as e:
-            messagebox.showerror("Error", f"Invalid max distance: {e}")
+            messagebox.showerror("Error", f"Invalid distance range: {e}")
             return None
 
     def _get_sweep_speed(self) -> float | None:
@@ -1061,6 +1163,33 @@ class TurntableGuiApp:
     def _selected_lidar_kind(self) -> str:
         return "lakibeam" if self.lidar_var.get().startswith("LakiBeam") else "fairy"
 
+    def _selected_turntable_port(self) -> str:
+        return port_from_label(self.port_var.get()) or self.node._turntable_port
+
+    def _on_port_selected(self, _event=None):
+        port = self._selected_turntable_port()
+        if port == self.node._turntable_port:
+            return
+        self.node._turntable_port = port
+        running = self.node._launch_proc is not None and self.node._launch_proc.poll() is None
+        suffix = " (takes effect on next Restart services)" if running else ""
+        self._log(f"Turntable port set to {port}{suffix}")
+
+    def _on_refresh_ports(self):
+        values = list_serial_ports()
+        self.port_combo["values"] = values
+        current = self._selected_turntable_port()
+        match = next((v for v in values if port_from_label(v) == current), None)
+        if match:
+            self.port_var.set(match)
+        elif values:
+            self.port_var.set(values[0])
+        self.node._turntable_port = self._selected_turntable_port()
+        if not values:
+            self._log("No USB serial ports found. If the adapter was plugged in after the "
+                      "container started, restart the dev container (its /dev is a private "
+                      "tmpfs and misses re-enumerated devices).")
+
     def _on_restart_services(self):
         kind = self._selected_lidar_kind()
         self._set_buttons(tk.DISABLED, tk.DISABLED)
@@ -1068,6 +1197,7 @@ class TurntableGuiApp:
 
     def _do_restart_services(self, kind: str):
         self.node._lidar_kind = kind
+        self.node._turntable_port = self._selected_turntable_port()
         use_fairy = kind == "fairy"
         ok = self.node.restart_sensor_env(use_fairy=use_fairy)
         if ok:
@@ -1079,7 +1209,8 @@ class TurntableGuiApp:
         self._set_buttons(tk.NORMAL, tk.DISABLED, tk.NORMAL)
         if ok:
             self._update_status(True, "READY")
-            self._log(f"Services restarted (fairy={'on' if use_fairy else 'off'})")
+            self._log(f"Services restarted (fairy={'on' if use_fairy else 'off'}, "
+                      f"port={self.node._turntable_port})")
         else:
             messagebox.showerror("Error", "Restart services failed")
 
@@ -1087,14 +1218,14 @@ class TurntableGuiApp:
         scan_range = self._get_scan_range()
         if scan_range is None:
             return
-        max_dist = self._get_max_dist()
-        if max_dist is None:
+        dist_range = self._get_range()
+        if dist_range is None:
             return
         speed = self._get_sweep_speed()
         if speed is None:
             return
         self.sweep_speed = speed
-        self.node._max_dist = max_dist
+        self.node._min_dist, self.node._max_dist = dist_range
         self.node._lidar_kind = self._selected_lidar_kind()
         self._set_buttons(tk.DISABLED, tk.DISABLED)
         self._run_in_thread(lambda: self._do_scan(scan_range))
@@ -1137,6 +1268,10 @@ def main():
     parser.add_argument("--lakibeam-port", type=int, default=2368, help="LakiBeam UDP port")
     parser.add_argument("--install-config", default="config/install_side_mount.yaml",
                         help="LakiBeam install config YAML")
+    parser.add_argument("--min-dist", type=float, default=MIN_RANGE_M,
+                        help="Near range cutoff in meters (merged points closer than this are dropped)")
+    parser.add_argument("--max-dist", type=float, default=3.0,
+                        help="Far range cutoff in meters")
     args = parser.parse_args()
 
     config = {
@@ -1145,6 +1280,8 @@ def main():
         "depth_cloud_topic": args.depth_cloud_topic,
         "lakibeam_port": args.lakibeam_port,
         "install_config": args.install_config,
+        "min_dist": args.min_dist,
+        "max_dist": args.max_dist,
     }
 
     rclpy.init()

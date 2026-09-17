@@ -4,14 +4,14 @@
 #   mount.axis/angle_deg : 棱镜 0° 参考相位（绕雷达系该轴旋转对齐）
 #   to_world.x/y/z       : 世界系 x/y/z 轴各取自雷达系哪个轴（可带负号）
 name: side-mount
-description: 横装：雷达 x 下、y 左、z 前（默认）
+description: 横装：雷达 x 下、y 左、z 前
 mount:
   axis: z
   angle_deg: 90.0
 to_world:
   x: z
-  y: y
-  z: -x
+  y: -y
+  z: x
 turntable_axis: z
 tilt:
   roll_deg: 0.0
