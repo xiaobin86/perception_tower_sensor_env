@@ -90,7 +90,7 @@ corners, 120 mm squares.
 
 **Official extrinsics (2026-09-20)** = solve over the 16 good `20260918_*` poses (073749 wide-scan
 excluded, 062814 auto-skipped: no checkerboard), plus the eye/deepth-validated `t.y` offset (see
-version-selection logic below): `t = [0.02917, 0.060, −0.03006]`,
+version-selection logic below): `t = [0.02917, 0.060, −0.01006]`,
    R = solve + **roll −0.9°** (all post-solve tweaks eye-validated via
    `tune_rotation_live.py` keyboard tuning on the last frame: dy +30 mm, dz −70 mm, roll −0.9°). Earlier backups were removed on
 purpose; `run_calibration.sh` still rebuilds from `turntable_output/calib_*` when those exist.
@@ -110,7 +110,7 @@ The selection is evidence-chained; each step's judge is listed:
    boards). Judge: the camera **depth cloud** (independent sensor), not the LiDAR board fit. The
    depth-based solve (`solve_ty_residual.py`) returned Δt.y = −0.3 mm at dy −30 mm (noise level). Offsets dy −30/−20 mm and raw
    were all eye-reviewed; the board-only vertical stays weakly observable, so the final
-   vertical/depth values come from keyboard eye-tuning on the last frame (ty +30 mm, tz −70 mm
+   vertical/depth values come from keyboard eye-tuning on the last frame (ty +30 mm, tz −50 mm
    on top of the solve); vertical is closed.
 4. **Rotation tweaks must survive a falsification test**: the depth cloud persistently suggested
    +3.86° pitch about world X, but applying it *worsened* the depth RMS (40.3 → 42.5 mm) and the
