@@ -263,9 +263,43 @@ perception_tower_sensor_env/
 ├── perception_tower_interfaces/         # 系统级消息/服务定义
 │   ├── msg/TurntableStatus.msg
 │   └── srv/TurntableCommand.srv
+├── *.py                             # 标定与点云工具脚本(见下节)
+├── config/                          # 相机内外参/安装配置
 ├── docs/                        # 问题排查记录
 └── README.md
 ```
+
+## 标定与点云工具脚本
+
+工作区根目录的脚本(均在容器内运行, `cd /workspace`)。坐标约定、标定管线细节与
+**外参选版逻辑见 AGENTS.md**。外参文件 `config/camera_extrinsics.yaml` 为结构化格式:
+`lidar_to_camera`(生效值) + `solve_baseline`(标定解) + `tweaks`(目测评判微调)。
+
+### 核心链路
+
+| 脚本 | 作用 |
+|------|------|
+| `turntable_gui.py` | 转台扫描 GUI: 扫描→合并→自动上色(`colorize_pointcloud`)→自动找板(`segment_board`) |
+| `segment_board.py` | LiDAR 标定板分割: 去地面→多种子RANSAC(±2cm)→SVD精修→两段式滑窗(环带评分)→带内最大连通域→质量门。阈值集中在文件头配置块 |
+| `calibrate_camera_lidar.py` | 相机-LiDAR 外参标定: 相机侧棋盘格PnP(坏角点>2.5px剔除, >2个整帧踢)+雷达侧segment_board→法向Kabsch解R+板中心差解t+图像空间精修 |
+| `colorize_pointcloud.py` | 按外参把 merged.ply 投影到 color.png 生成 colored.ply |
+| `tune_rotation_live.py` | 键盘微调外参(yaw/pitch/roll 每次0.2°, tx/ty/tz 每次10mm), 每次按键重渲染最后一帧 colored.ply 供目测; 不写入正式外参 |
+| `install_config.py` | 雷达安装姿态配置(装载方式/轴向/to_world映射/偏心补偿), GUI 每次扫描现读 |
+| `lakibeam_viewer.py` | LakiBeam UDP 点云接收 + 实时查看(MSOP 协议) |
+| `run_calibration.sh` | 用所有 `turntable_output/calib_*` 帧重算外参 → config/camera_extrinsics.yaml |
+
+### 审计与辅助工具
+
+| 脚本 | 作用 |
+|------|------|
+| `annotate_camera_side.py` | 相机侧标注: 角点/重投影/板框/中心画到图上 + 全帧坏角点统计(与标定同一剔除策略) |
+| `solve_ty_residual.py` | 相机深度云联解 Δt.y 与俯仰残差(竖直方向独立判据) |
+| `solve_pitch_residual.py` | 同上, 俯仰专项; 曾用于证伪"+3.86°俯仰"假信号(见 AGENTS.md 选版逻辑) |
+| `verify_board.py` | 把分割出的板投影到照片, 与棋盘格外框算重合率(双传感器交叉审计) |
+| `crop_pointcloud.py` | 按距离+水平角度裁剪点云(ROI) |
+| `save_camera_info.py` | 从相机话题保存内参到 config/camera_info.yaml |
+| `undistort_images.py` | 按内参去畸变(当前 camera_info 已置零畸变, 一般不需要) |
+| `visualize_ply.py` | 点云查看器 |
 
 ## 常见问题
 
