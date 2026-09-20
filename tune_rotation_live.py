@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """键盘微调 yaw/pitch/roll + tx/ty/tz 并实时重渲染最后一帧 colored.ply 供目测。
 
-键位 (旋转每次 0.2°, 平移每次 1mm, 均叠加在合并系/雷达侧, 右手系):
+键位 (旋转每次 0.2°, 平移每次 10mm, 均叠加在合并系/雷达侧, 右手系):
   a / d   yaw   负/正   (绕世界Z, 俯视逆时针为正)
   s / w   pitch 负/正   (绕世界X)
   q / e   roll  负/正   (绕世界Y)
@@ -31,7 +31,7 @@ BASE_EXTRINSICS = "config/camera_extrinsics.yaml"
 CAMERA_INFO = "config/camera_info.yaml"
 TMP_EXTRINSICS = "/tmp/ext_rotation_tune.yaml"
 STEP_DEG = 0.2
-STEP_MM = 1.0
+STEP_MM = 10.0
 
 
 def rot_x(deg: float) -> np.ndarray:
@@ -67,7 +67,7 @@ def main() -> int:
 
     yaw = pitch = roll = 0.0
     dx = dy = dz = 0.0
-    print(f"目标帧: {pose}  (基准: {BASE_EXTRINSICS}, 旋转每次 {STEP_DEG}°, 平移每次 {STEP_MM}mm)")
+    print(f"目标帧: {pose}  (基准: {BASE_EXTRINSICS}, 旋转每次 {STEP_DEG}°, 平移每次 {STEP_MM:.0f}mm)")
     print("键位: a/d=yaw  s/w=pitch  q/e=roll  f/h=tx  t/g=ty  v/b=tz  r=清零  x=退出\n")
 
     fd = sys.stdin.fileno()
