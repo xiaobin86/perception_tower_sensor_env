@@ -56,7 +56,7 @@ MIN_SEL = 300                     # 最终选中点下限(原始点云系), 低�
 # 带内最大连通域(滑窗后的"原平面"口径)
 BAND_CELL = 0.02                  # 连通域栅格边长 2cm
 # 质量门(与 calibrate_camera_lidar.py 顶部的门同步修改):
-#   裁剪长边 >= 0.78m, 短边 >= 0.54m, 尺寸误差 <= 16%, 原占比 >= 0.75, 否则整帧剔除
+#   裁剪长边 >= 0.78m, 短边 >= 0.54m, 尺寸误差 <= 16%, 原占比 >= 0.85, 否则整帧剔除
 
 
 def _ransac_planes(P: np.ndarray, dist_thr: float = DIST_THR, K: int = RANSAC_K,
@@ -315,7 +315,7 @@ def main() -> int:
         band_n = int(info.get("band_cc_n", 0))
         ratio_P = info["n_sel"] / max(band_n, 1)
         warn = ""
-        if ratio_P < 0.75:
+        if ratio_P < 0.85:
             warn += " [占比低?]"
         if se > 0.16:
             warn += " [缩窗?]"
