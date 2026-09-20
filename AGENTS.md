@@ -126,6 +126,20 @@ All-upright boards leave the camera pitch/roll weakly observable and their incid
 not self-correct. Judge candidate extrinsics against the depth cloud — board-plane RMS alone is
 misleading (and even the depth cloud can be fooled by parallax systematics, see step 4).
 
+## 标定经验教训（20260918 数据集排障 3 天，代价：tz 偏差 50mm）
+
+1. **LiDAR/相机等设备的刚性安装位姿必须准确**：安装角、偏心、to_world 映射的任何偏差
+   都会以系统误差形式进入外参；安装配置（`install_config.py`）改动后必须重标。
+2. **标定板必须标准**：标称 120mm 的格子实测 116mm（−3.3%）→ PnP 测距同比例偏大 →
+   被外参 t 吸收 → 深度方向差 5cm。**尺度吸收使一切角点/重投影类判据失效**（PnP 把
+   尺度误差全吸收进距离，重投影 RMS 依然 <1px）——这次所有自动判据都没报警，最后是
+   深度云对比 + 人眼抓出来的。**教训：标定前先拿尺子量格子**。
+3. **诊断方法论**：双传感器"同原点、同物点"测距对比（`solve_range_bias.py`：
+   PnP 板深度 vs Orbbec 深度云）能暴露一切被 t 吸收的系统偏差；它不经外参 t，
+   是标定后的第一道审计。预测-验证闭环：理论预测 tz 吸收 +54mm ≈ 人眼微调 −50mm；
+   改 `SQUARE_SIZE_M=0.116` 后裸解与全套人工微调版差 <4mm —— 根因确认。
+4. 完整推导与配图：`docs/tz_bias_analysis.md` + `docs/fig1~4_*.png`（`make_tz_figs.py` 生成）。
+
 ## Existing helper scripts
 
 - `save_camera_info.py` — dump `/camera/color/camera_info` to `config/camera_info.yaml`.

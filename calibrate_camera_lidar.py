@@ -25,7 +25,7 @@ import cv2
 import numpy as np
 import yaml
 
-SQUARE_SIZE_M = 0.12
+SQUARE_SIZE_M = 0.116  # 实测格距(标称120mm, 尺子量得116, 见 docs/tz_bias_analysis.md 尺度偏差溯源)
 BOARD_COLS = 4
 BOARD_ROWS = 6
 BOARD_WIDTH_M = 0.60
@@ -299,7 +299,7 @@ def extract_lidar_board(points: np.ndarray, rng: np.random.Generator, out_dir: s
             se = abs(lo - 0.84) / 0.84 + abs(sh - 0.60) / 0.60
             # 质量门: 裁剪应接近满尺寸 0.84x0.60(下限+误差上限) 且最大联通区域
             # 占比足够(混墙/分割错 -> 占比低; 条带/缩窗 -> 尺寸不对)
-            if lo < 0.78 or sh < 0.54 or se > 0.16 or ratio < 0.75:
+            if lo < 0.78 or sh < 0.54 or se > 0.16 or ratio < 0.85:
                 raise ValueError(
                     f"board quality gate: size {lo*100:.0f}x{sh*100:.0f}cm "
                     f"err {se*100:.0f}% ratio {ratio:.2f}")
