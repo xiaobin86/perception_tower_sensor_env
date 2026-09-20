@@ -49,6 +49,7 @@ def main() -> int:
     parser.add_argument("--camera-info", default="config/camera_info.yaml")
     parser.add_argument("--data-root", default="turntable_output")
     parser.add_argument("--scans", type=int, default=6)
+    parser.add_argument("--match", default="", help="只使用目录名包含该子串的扫描（如 20260917_041）")
     parser.add_argument("--params", default="ty,rz", help="逗号分隔，可选 tx,ty,tz,rx,ry,rz")
     parser.add_argument("--samples", type=int, default=5000)
     parser.add_argument("--photo-angle", type=float, default=90.0)
@@ -69,7 +70,8 @@ def main() -> int:
 
     dirs = sorted(d for d in os.listdir(args.data_root)
                   if os.path.exists(os.path.join(args.data_root, d, "merged.ply"))
-                  and os.path.exists(os.path.join(args.data_root, d, "depth_cloud.ply")))
+                  and os.path.exists(os.path.join(args.data_root, d, "depth_cloud.ply"))
+                  and (not args.match or args.match in d))
     step = max(1, len(dirs) // args.scans)
     dirs = dirs[::step][:args.scans]
 
@@ -113,8 +115,13 @@ def main() -> int:
         meds = []
         for pts, tree, z in zip(cloud, trees, zc):
             pc = (R @ pts.T).T + t
-            d, _ = tree.query(pc, k=1)
-            meds.append(np.median(d))
+            d, j = tree.query(pc, k=1)
+            good = d < 0.15
+            if int(good.sum()) < 200:
+                meds.append(1.0)
+                continue
+            off = pc[good] - tree.data[j[good]]
+            meds.append(float(np.mean(np.abs(off[:, 0])) + np.mean(np.abs(off[:, 1]))))
         meds = np.array(meds)
         if detail:
             return meds

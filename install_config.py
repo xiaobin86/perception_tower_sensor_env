@@ -7,7 +7,8 @@
      用"世界 x/y/z 各取自雷达系哪个轴（可带符号）"描述。
 
 换安装方式（正装/横装/倾斜）时只需改 YAML 配置文件，
-不需要改任何代码。默认内置 side-mount（横装）配置。
+不需要改任何代码。配置以 YAML 为唯一来源：本模块不提供内置默认，
+load() 在任何字段缺失时直接报错。
 
 YAML 格式示例（configs/install_side_mount.yaml）：
     name: side-mount
@@ -63,50 +64,30 @@ def _axis_name(vec: np.ndarray) -> str:
 class InstallConfig:
     """一次完整的雷达安装方式描述。"""
 
-    name: str = "side-mount"
-    description: str = "横装：雷达 x 下、y 左、z 前（默认）"
+    name: str
+    description: str
     # 棱镜 0° 参考相位：绕雷达系 axis 旋转 angle_deg 度
-    mount_axis: str = "z"
-    mount_angle_deg: float = 90.0
+    mount_axis: str
+    mount_angle_deg: float
     # 世界系 x/y/z 三轴分别取自雷达系哪个轴（可带负号）
-    world_x: str = "z"
-    world_y: str = "y"
-    world_z: str = "-x"
+    world_x: str
+    world_y: str
+    world_z: str
     # 转盘旋转轴（世界系），拼接聚合时绕它旋转
-    turntable_axis: str = "z"
+    turntable_axis: str
     # 安装后微小倾斜角（度），由 360° 自标定得到。
     # 顺序：Rx(roll) -> Ry(pitch) -> Rz(yaw)，即 R_tilt = Rz @ Ry @ Rx。
-    tilt_roll_deg: float = 0.0
-    tilt_pitch_deg: float = 0.0
-    tilt_yaw_deg: float = 0.0
+    tilt_roll_deg: float
+    tilt_pitch_deg: float
+    tilt_yaw_deg: float
     # LiDAR 安装姿态相对理想横装的偏差（度）。
     # 顺序：Rx(roll) -> Ry(pitch) -> Rz(yaw)，即 R_lidar = Rz @ Ry @ Rx。
-    lidar_tilt_roll_deg: float = 0.0
-    lidar_tilt_pitch_deg: float = 0.0
-    lidar_tilt_yaw_deg: float = 0.0
+    lidar_tilt_roll_deg: float
+    lidar_tilt_pitch_deg: float
+    lidar_tilt_yaw_deg: float
     # 光心相对转盘轴心的偏心校正（米，雷达系 y/z 方向）
-    offset_y_m: float = 0.0
-    offset_z_m: float = 0.0
-
-    # ---- 构造 ----
-    @classmethod
-    def side_mount(cls) -> "InstallConfig":
-        """横装（默认）：x 下、y 左、z 前，棱镜相位绕 z 90°。"""
-        return cls()
-
-    @classmethod
-    def upright(cls) -> "InstallConfig":
-        """正装（出厂姿态）：x 前、y 左、z 上，棱镜相位 0°。"""
-        return cls(
-            name="upright",
-            description="正装（出厂姿态）：雷达 x 前、y 左、z 上",
-            mount_axis="z",
-            mount_angle_deg=0.0,
-            world_x="x",
-            world_y="y",
-            world_z="z",
-            turntable_axis="z",
-        )
+    offset_y_m: float
+    offset_z_m: float
 
     # ---- 变换矩阵 ----
     def mount_matrix(self) -> np.ndarray:
@@ -184,31 +165,38 @@ class InstallConfig:
 
     @classmethod
     def load(cls, path: str | Path) -> "InstallConfig":
-        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        p = Path(path)
+        data = yaml.safe_load(p.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
-            raise ValueError(f"配置文件格式错误（应为 YAML 映射）: {path}")
-        mount = data.get("mount", {})
-        to_world = data.get("to_world", {})
-        tilt = data.get("tilt", {})
-        lidar_tilt = data.get("lidar_tilt", {})
-        offset = data.get("offset", {})
+            raise ValueError(f"配置文件格式错误（应为 YAML 映射）: {p}")
+
+        def req(mapping, key: str):
+            if not isinstance(mapping, dict) or key not in mapping:
+                raise ValueError(f"{p}: 缺少字段 {key!r}（配置以 YAML 为唯一来源，无内置默认）")
+            return mapping[key]
+
+        mount = req(data, "mount")
+        to_world = req(data, "to_world")
+        tilt = req(data, "tilt")
+        lidar_tilt = req(data, "lidar_tilt")
+        offset = req(data, "offset")
         return cls(
-            name=data.get("name", "custom"),
-            description=data.get("description", ""),
-            mount_axis=mount.get("axis", "z"),
-            mount_angle_deg=float(mount.get("angle_deg", 90.0)),
-            world_x=to_world.get("x", "z"),
-            world_y=to_world.get("y", "y"),
-            world_z=to_world.get("z", "-x"),
-            turntable_axis=data.get("turntable_axis", "z"),
-            tilt_roll_deg=float(tilt.get("roll_deg", 0.0)),
-            tilt_pitch_deg=float(tilt.get("pitch_deg", 0.0)),
-            tilt_yaw_deg=float(tilt.get("yaw_deg", 0.0)),
-            lidar_tilt_roll_deg=float(lidar_tilt.get("roll_deg", 0.0)),
-            lidar_tilt_pitch_deg=float(lidar_tilt.get("pitch_deg", 0.0)),
-            lidar_tilt_yaw_deg=float(lidar_tilt.get("yaw_deg", 0.0)),
-            offset_y_m=float(offset.get("y_m", 0.0)),
-            offset_z_m=float(offset.get("z_m", 0.0)),
+            name=req(data, "name"),
+            description=req(data, "description"),
+            mount_axis=req(mount, "axis"),
+            mount_angle_deg=float(req(mount, "angle_deg")),
+            world_x=req(to_world, "x"),
+            world_y=req(to_world, "y"),
+            world_z=req(to_world, "z"),
+            turntable_axis=req(data, "turntable_axis"),
+            tilt_roll_deg=float(req(tilt, "roll_deg")),
+            tilt_pitch_deg=float(req(tilt, "pitch_deg")),
+            tilt_yaw_deg=float(req(tilt, "yaw_deg")),
+            lidar_tilt_roll_deg=float(req(lidar_tilt, "roll_deg")),
+            lidar_tilt_pitch_deg=float(req(lidar_tilt, "pitch_deg")),
+            lidar_tilt_yaw_deg=float(req(lidar_tilt, "yaw_deg")),
+            offset_y_m=float(req(offset, "y_m")),
+            offset_z_m=float(req(offset, "z_m")),
         )
 
 

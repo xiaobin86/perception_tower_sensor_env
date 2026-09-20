@@ -18,6 +18,8 @@ def generate_launch_description():
     turntable_port = LaunchConfiguration("turntable_port")
     params_file = LaunchConfiguration("params_file")
     use_fairy = LaunchConfiguration("use_fairy")
+    enable_colored_pc = LaunchConfiguration("enable_colored_pc")
+    ordered_pc = LaunchConfiguration("ordered_pc")
 
     default_params = PathJoinSubstitution(
         [FindPackageShare("perception_tower_sensor"), "config", "turntable_params.yaml"]
@@ -40,7 +42,11 @@ def generate_launch_description():
     orbbec_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([FindPackageShare("orbbec_camera"), "launch", "gemini_330_series.launch.py"])
-        )
+        ),
+        launch_arguments={
+            "enable_colored_point_cloud": enable_colored_pc,
+            "ordered_pc": ordered_pc,
+        }.items(),
     )
 
     # Turntable node (delayed until camera and LiDAR are stable)
@@ -69,6 +75,18 @@ def generate_launch_description():
             "use_fairy",
             default_value="true",
             description="Launch the RoboSense Fairy LiDAR driver.",
+        ),
+        DeclareLaunchArgument(
+            "enable_colored_pc",
+            default_value="true",
+            description="Publish the RGB cloud on /camera/depth_registered/points (D2C-aligned to the color "
+                        "camera; requires identical color and depth resolutions, else frames are dropped).",
+        ),
+        DeclareLaunchArgument(
+            "ordered_pc",
+            default_value="true",
+            description="Keep the organized WxH grid so point index i maps to color pixel (i%W, i/W); "
+                        "with false the cloud is compacted to width=N, height=1.",
         ),
         orbbec_launch,
         rslidar_node_delayed,

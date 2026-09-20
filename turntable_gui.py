@@ -154,9 +154,10 @@ class TurntableGuiController(Node):
         cam_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.color_sub = self.create_subscription(Image, color_topic, self._on_color, cam_qos)
         self.depth_sub = self.create_subscription(Image, depth_topic, self._on_depth, cam_qos)
-        self.depth_cloud_topic = config.get("depth_cloud_topic", "/camera/depth/points")
+        self.depth_cloud_topic = config.get("depth_cloud_topic", "/camera/depth_registered/points")
+        cloud_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.depth_cloud_sub = self.create_subscription(
-            PointCloud2, self.depth_cloud_topic, self._on_depth_cloud, cam_qos
+            PointCloud2, self.depth_cloud_topic, self._on_depth_cloud, cloud_qos
         )
 
         if not self._no_fairy:
@@ -180,6 +181,7 @@ class TurntableGuiController(Node):
         self.depth_ts: float | None = None
         self.depth_cloud_msg: PointCloud2 | None = None
         self.depth_cloud_ts: float | None = None
+        self.depth_cloud_snapshot: PointCloud2 | None = None
         self.depth_cloud_xyz: np.ndarray | None = None
 
         self._launch_proc: subprocess.Popen | None = None
@@ -189,6 +191,7 @@ class TurntableGuiController(Node):
         os.makedirs(self._out_base, exist_ok=True)
 
         self._log_callback = None
+        self._log_file = None
 
     def _descendant_pids(self, root_pid: int) -> list[int]:
         children: dict[int, list[int]] = {}
@@ -331,6 +334,14 @@ class TurntableGuiController(Node):
 
     def log(self, msg: str):
         self.get_logger().info(msg)
+        try:
+            if self._log_file is None:
+                os.makedirs(self._out_base, exist_ok=True)
+                self._log_file = open(os.path.join(self._out_base, "gui.log"), "a", encoding="utf-8")
+            self._log_file.write(f"[{datetime.now().strftime('%m-%d %H:%M:%S')}] {msg}\n")
+            self._log_file.flush()
+        except Exception:
+            self._log_file = None
         if self._log_callback:
             try:
                 self._log_callback(msg)
@@ -455,14 +466,65 @@ class TurntableGuiController(Node):
                 f.write(bytes(color.data))
             with open(dpath + ".raw", "wb") as f:
                 f.write(bytes(depth.data))
-        self.save_depth_cloud()
+        self.capture_depth_cloud_snapshot()
 
-    def save_depth_cloud(self):
-        msg = self.depth_cloud_msg
-        if msg is None:
-            self.log("Depth point cloud not available")
+    def capture_depth_cloud_snapshot(self):
+        script = os.path.join(os.getcwd(), "fetch_depth_cloud_once.py")
+        self.log(f"Fetching depth cloud at 90deg in a separate process -> {self.out_dir}")
+        try:
+            proc = subprocess.run(
+                [sys.executable, script, self.out_dir, "--topic", self.depth_cloud_topic],
+                capture_output=True, text=True, timeout=30.0, cwd=os.getcwd(),
+            )
+            for line in (proc.stdout or "").strip().splitlines():
+                self.log(f"depth cloud fetch: {line}")
+            if proc.returncode != 0:
+                err = " | ".join((proc.stderr or "").strip().splitlines()[-3:])
+                self.log(f"depth cloud fetch failed (rc={proc.returncode}): {err}")
+        except Exception as exc:
+            self.log(f"depth cloud subprocess error: {exc}")
+        ts = self.depth_cloud_ts
+        self.depth_cloud_snapshot = (self.depth_cloud_msg
+                                     if ts is not None and (time.monotonic() - ts) <= 2.0 else None)
+
+    def _fetch_depth_cloud(self, timeout_s: float = 8.0):
+        node = rclpy.create_node("depth_cloud_fetch")
+        received: dict = {}
+        cloud_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+        node.create_subscription(PointCloud2, self.depth_cloud_topic,
+                                 lambda m: received.setdefault("m", m), cloud_qos)
+        deadline = time.monotonic() + timeout_s
+        while "m" not in received and time.monotonic() < deadline:
+            rclpy.spin_once(node, timeout_sec=0.2)
+        node.destroy_node()
+        return received.get("m")
+
+    def save_depth_cloud(self, fresh_timeout_s: float = 6.0, fresh_window_s: float = 2.0):
+        if os.path.exists(os.path.join(self.out_dir, "depth_cloud.ply")):
+            self.log("Depth cloud already saved at the 90deg step; loading it for cropping")
+            try:
+                self.depth_cloud_xyz = self._read_ply_xyz(os.path.join(self.out_dir, "depth_cloud.ply"))
+            except Exception as exc:
+                self.log(f"Reload depth cloud failed: {exc}")
             return
-        xyz = self._pointcloud2_xyz(msg)
+        msg = self.depth_cloud_snapshot
+        if msg is None:
+            self.log("No depth cloud snapshot taken at the photo pose; falling back to the latest message")
+            deadline = time.monotonic() + fresh_timeout_s
+            while time.monotonic() < deadline:
+                ts = self.depth_cloud_ts
+                if ts is not None and (time.monotonic() - ts) <= fresh_window_s:
+                    break
+                time.sleep(0.1)
+            msg = self.depth_cloud_msg
+        if msg is None:
+            self.log(f"Depth point cloud not available (topic {self.depth_cloud_topic})")
+            return
+        try:
+            xyz, rgb = self._pointcloud2_xyz_rgb(msg)
+        except Exception as exc:
+            self.log(f"Depth cloud parse failed: {exc}")
+            return
         if xyz is None or len(xyz) == 0:
             self.log("Depth point cloud empty")
             return
@@ -470,6 +532,13 @@ class TurntableGuiController(Node):
         path = os.path.join(self.out_dir, "depth_cloud.ply")
         self._save_ply(path, xyz)
         self.log(f"Depth point cloud saved: {path} ({len(xyz)} points)")
+        if rgb is not None:
+            cpath = os.path.join(self.out_dir, "depth_cloud_colored.ply")
+            self._save_ply_rgb(cpath, xyz, rgb)
+            self.log(f"Colored depth cloud saved (camera-side, no extrinsics): {cpath}")
+        else:
+            self.log(f"Depth cloud has no rgb field (topic {self.depth_cloud_topic}); "
+                     f"enable_colored_point_cloud:=true for a colored depth cloud")
 
     def process_depth_cloud(self):
         xyz = self.depth_cloud_xyz
@@ -483,6 +552,33 @@ class TurntableGuiController(Node):
         path = os.path.join(self.out_dir, "depth_cloud_cropped.ply")
         self._save_ply(path, xyz)
         self.log(f"Depth point cloud cropped: {path} ({len(xyz)} points, max_dist={max_dist})")
+
+    def _pointcloud2_xyz_rgb(self, msg: PointCloud2) -> tuple[np.ndarray, np.ndarray | None]:
+        fields = {f.name: f.offset for f in msg.fields}
+        if not all(name in fields for name in ("x", "y", "z")):
+            raise ValueError("point cloud has no xyz fields")
+        step = msg.point_step
+        count = len(msg.data) // step
+        raw = np.frombuffer(bytes(msg.data), dtype=np.uint8, count=count * step).reshape(count, step)
+        xyz = raw[:, :12].copy().view(np.float32)
+        keep = np.isfinite(xyz).all(axis=1) & (np.abs(xyz) > 0.0).any(axis=1)
+        rgb = None
+        if "rgb" in fields:
+            off = fields["rgb"]
+            rgb = raw[:, off:off + 3].copy()[keep]
+        return xyz[keep], rgb
+
+    def _save_ply_rgb(self, path: str, xyz: np.ndarray, rgb: np.ndarray):
+        n = xyz.shape[0]
+        with open(path, "w") as f:
+            f.write("ply\nformat ascii 1.0\n")
+            f.write(f"element vertex {n}\n")
+            f.write("property float x\nproperty float y\nproperty float z\n")
+            f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
+            f.write("end_header\n")
+        with open(path, "a") as f:
+            np.savetxt(f, np.column_stack([xyz, rgb.astype(np.float64)]),
+                       fmt="%.6f %.6f %.6f %.0f %.0f %.0f")
 
     def _pointcloud2_xyz(self, msg: PointCloud2) -> np.ndarray | None:
         try:
@@ -569,8 +665,12 @@ class TurntableGuiController(Node):
         try:
             install = InstallConfig.load(self._install_config_path)
         except Exception as exc:
-            self.log(f"Install config load failed ({exc}); using side_mount defaults")
-            install = InstallConfig.side_mount()
+            self.log(f"Install config load failed: {exc}")
+            self.log("Merge aborted — 需要有效的 install yaml（不再回退到内置默认）")
+            return
+        self.log(f"Install config: {self._install_config_path}  mount={install.mount_axis}{install.mount_angle_deg}°  "
+                 f"to_world x:{install.world_x} y:{install.world_y} z:{install.world_z}  "
+                 f"offset y={install.offset_y_m} z={install.offset_z_m}")
         angle_times = np.array([s[0] for s in capture.angle_samples])
         angle_values = np.array([s[1] for s in capture.angle_samples])
         max_range = self._max_dist if self._max_dist is not None else 1.0e9
@@ -685,8 +785,9 @@ class TurntableGuiController(Node):
         self._start_capture()
 
         self.log("Waiting for motion to finish...")
-        if not self.wait_for_turntable_idle(target_deg=scan_end_deg, timeout_s=60.0):
-            self.log("Scan move timeout")
+        wait_s = max(60.0, scan_duration * 1.5 + 30.0)
+        if not self.wait_for_turntable_idle(target_deg=scan_end_deg, timeout_s=wait_s):
+            self.log(f"Scan move timeout after {wait_s:.0f}s (scan_duration={scan_duration:.1f}s)")
             self._stop_capture()
             return False
 
@@ -735,11 +836,13 @@ class TurntableGuiController(Node):
         self.log("Capture stopped")
 
     def _process_frames_and_merge(self, capture: ScanCapture):
+        self.save_depth_cloud()
         if self._lidar_kind == "lakibeam":
             self._merge_lakibeam(capture)
             self.process_depth_cloud()
             photo_angle = (capture.scan_start_deg + capture.scan_end_deg) / 2.0
             self._colorize_merged(capture.out_dir, photo_angle)
+            self._detect_board(capture.out_dir)
             return
         captured_frames: list[tuple[float, np.ndarray]] = []
         if not self._no_fairy and capture.raw_frames:
@@ -827,6 +930,34 @@ class TurntableGuiController(Node):
 
         photo_angle = (capture.scan_start_deg + capture.scan_end_deg) / 2.0
         self._colorize_merged(capture.out_dir, photo_angle)
+        self._detect_board(capture.out_dir)
+
+    def _detect_board(self, out_dir: str) -> None:
+        """每次扫描合并后跑 segment_board 找板, 产出 board_rect.ply + overlay。
+        独立于外参(无上色配置也跑); 失败只记日志, 不影响扫描流程。"""
+        merged = os.path.join(out_dir, "merged.ply")
+        if not os.path.exists(merged):
+            return
+        try:
+            from segment_board import DIST_THR, extract_rect_plane, write_ply
+            P = self._read_ply_xyz(merged)
+            mask, info = extract_rect_plane(P)
+            if mask is None:
+                self.log(f"Board: not found in {os.path.basename(out_dir)}")
+                return
+            write_ply(os.path.join(out_dir, "board_rect.ply"), P[mask])
+            band_full = info.get("band_mask")
+            if band_full is None:
+                band_full = np.abs(P @ info["n"] - info["d"]) < DIST_THR
+            cols = np.full((len(P), 3), 120, np.uint8)
+            cols[band_full & ~mask] = (30, 30, 255)
+            cols[mask] = (255, 30, 30)
+            write_ply(os.path.join(out_dir, "board_rect_overlay.ply"), P, cols)
+            ratio = info["n_sel"] / max(int(info.get("band_cc_n", 1)), 1)
+            self.log(f"Board: {os.path.basename(out_dir)} selected={info['n_sel']} "
+                     f"band_ratio={ratio:.2f}")
+        except Exception as exc:
+            self.log(f"Board detection failed: {exc}")
 
     def _colorize_merged(self, out_dir: str, photo_angle_deg: float):
         extrinsics = os.path.join(os.getcwd(), "config", "camera_extrinsics.yaml")
@@ -834,6 +965,13 @@ class TurntableGuiController(Node):
         if not (os.path.exists(extrinsics) and os.path.exists(camera_info)):
             self.log("Colorize skipped: config/camera_extrinsics.yaml or camera_info.yaml missing")
             return
+        try:
+            import yaml as _yaml
+            _ex = _yaml.safe_load(open(extrinsics))["lidar_to_camera"]
+            self.log(f"Colorize extrinsics: {extrinsics} "
+                     f"t={[round(float(v), 5) for v in _ex['translation']]}")
+        except Exception as exc:
+            self.log(f"Colorize extrinsics read failed: {exc}")
         try:
             from colorize_pointcloud import colorize
             out, total, colored = colorize(out_dir, extrinsics, camera_info, photo_angle_deg)
@@ -862,6 +1000,16 @@ class TurntableGuiController(Node):
         except Exception as exc:
             self.log(f"PointCloud2 parse failed: {exc}")
             return None
+
+    def _read_ply_xyz(self, path: str) -> np.ndarray:
+        with open(path) as f:
+            for i, line in enumerate(f, 1):
+                if line.strip() == "end_header":
+                    break
+            else:
+                raise ValueError(f"{path}: no end_header")
+        data = np.loadtxt(path, skiprows=i, dtype=np.float64)
+        return data[:, :3].astype(np.float32)
 
     def _save_ply(self, path: str, xyz: np.ndarray):
         n = xyz.shape[0]
@@ -1258,7 +1406,7 @@ def main():
     parser = argparse.ArgumentParser(description="Perception Tower Turntable Control GUI")
     parser.add_argument("--color-topic", default="/camera/color/image_raw", help="Color image topic")
     parser.add_argument("--depth-topic", default="/camera/depth/image_raw", help="Depth image topic")
-    parser.add_argument("--depth-cloud-topic", default="/camera/depth/points", help="Depth point cloud topic")
+    parser.add_argument("--depth-cloud-topic", default="/camera/depth_registered/points", help="Depth point cloud topic")
     parser.add_argument("--fairy-topic", default="/rslidar_points", help="LiDAR point cloud topic")
     parser.add_argument("--ready-deg", type=float, default=90.0, help="Ready angle")
     parser.add_argument("--sweep-speed", type=float, default=40.0, help="Sweep speed")

@@ -12,4 +12,12 @@ if [ ${#dirs[@]} -eq 0 ]; then
 fi
 
 echo "标定数据集: ${#dirs[@]} 个"
+
+if [ -f config/camera_extrinsics.yaml ]; then
+    stamp=$(date +%Y%m%d_%H%M%S)
+    mkdir -p config/extrinsics_history
+    cp config/camera_extrinsics.yaml "config/extrinsics_history/${stamp}_before_recalib.yaml"
+    echo "已归档当前外参 -> config/extrinsics_history/${stamp}_before_recalib.yaml"
+fi
+
 python3 calibrate_camera_lidar.py "${dirs[@]}" --output config/camera_extrinsics.yaml
