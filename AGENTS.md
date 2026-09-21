@@ -36,6 +36,10 @@ Reusable tool: `crop_pointcloud.py`.
 
 ## Gotchas
 
+- **open3d 需手动安装**：`segment_board.py` / `visualize_ply.py` / `lakibeam_viewer.py`
+  依赖 open3d，容器重建后丢失（Dockerfile  intentionally 不装，避免 400MB 轮子拖慢
+  镜像构建）。容器启动后手动 `pip install open3d` 即可。
+
 - `merged.ply` is merged with the turntable reference at angle **0**, but the camera photo is taken at the
   ready angle (**90°**). For camera–LiDAR calibration the merge must be re-referenced to the photo angle:
   transform each frame by `(angle − photo_angle)` instead of `angle`, so the merged cloud is in the LiDAR
