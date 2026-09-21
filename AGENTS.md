@@ -26,7 +26,10 @@ Reusable tool: `crop_pointcloud.py`.
 
 ## Calibration target
 
-- Checkerboard: **5×7 squares = 4×6 inner corners**, square size **120 mm** (board 600×840 mm).
+- Checkerboard (2026-09 换新板): **9×7 squares = 8×6 inner corners**, rectangular squares
+  **88.75 mm (X) × 85.5 mm (Y)** (board ≈ 799×599 mm). 旧板（5×7 格 / 4×6 角点 / 标称 120mm
+  实测 116mm）因格距不标准已退役 —— 新板首次标定前**务必用尺子复核格距**（血泪见
+  标定经验教训）。
 - Camera: Orbbec Gemini 336L, color 1280×720, intrinsics in `config/camera_info.yaml` (plumb_bob distortion).
 - Goal: LiDAR→color-camera extrinsic via plane correspondences from **≥3 non-parallel board poses**
   (`n_c = R·n_l`, `d_c − d_l = n_c·t`).
@@ -85,8 +88,8 @@ Outputs: `cropped_3m_20deg_board.ply`, `view_board.png`.
 Constraints: **R needs ≥2 non-parallel board planes, t needs ≥3** (one plane fixes 3 of 6 DOF).
 Intrinsics from `config/camera_info.yaml` (distortion zeroed — the color image is treated as already
 rectified; pre-zeroing coefficients are in `config/camera_info.yaml.bak_withdist` and the pipeline
-passes `d` through `cv2.projectPoints`, so restoring them needs no code change); board is 4×6 inner
-corners, 120 mm squares.
+passes `d` through `cv2.projectPoints`, so restoring them needs no code change); board is 8×6 inner
+corners, rectangular 88.75×85.5 mm squares (SQUARE_SIZE_X/Y in `calibrate_camera_lidar.py`).
 
 **Official extrinsics (2026-09-20)** = solve over the 16 good `20260918_*` poses (073749 wide-scan
 excluded, 062814 auto-skipped: no checkerboard), plus the eye/deepth-validated `t.y` offset (see

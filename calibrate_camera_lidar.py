@@ -5,7 +5,7 @@ Each pose directory must contain `color.png` and `merged.ply`. See AGENTS.md for
 coordinate frame conventions.
 
 Pipeline per pose:
-    image  -> findChessboardCorners(4x6) -> solvePnP -> camera plane (n_c, d_c)
+    image  -> findChessboardCorners(8x6) -> solvePnP -> camera plane (n_c, d_c)
     cloud  -> remove ground -> search board-like plane -> LiDAR plane (n_l, d_l)
 Then:  n_c = R n_l   and   t from board centers, solved over all poses.
 
@@ -25,11 +25,14 @@ import cv2
 import numpy as np
 import yaml
 
-SQUARE_SIZE_M = 0.116  # 实测格距(标称120mm, 尺子量得116, 见 docs/tz_bias_analysis.md 尺度偏差溯源)
-BOARD_COLS = 4
+SQUARE_SIZE_X = 0.08875   # 标定板格子 X 向间距 (9列, 实测 — 标定前务必用尺子复核, 见 tz_bias_analysis)
+SQUARE_SIZE_Y = 0.0855    # 标定板格子 Y 向间距 (7行, 实测)
+BOARD_COLS = 8            # 内角点列数 (9x7格 -> 8x6内角点)
 BOARD_ROWS = 6
-BOARD_WIDTH_M = 0.60
-BOARD_HEIGHT_M = 0.84
+BOARD_LONG_M = 0.799      # 板外形长边 = 9*0.08875 (与 segment_board.py 的 BOARD_L 同步)
+BOARD_SHORT_M = 0.599     # 板外形短边 = 7*0.0855  (与 segment_board.py 的 BOARD_W 同步)
+BOARD_WIDTH_M = 0.599     # 旧路径窗口校验用: 短边
+BOARD_HEIGHT_M = 0.799    # 长边
 BOARD_TRIM_TOL_M = 0.02
 GROUND_MAX_TILT_COS = 0.96
 GROUND_MIN_SPAN_M = 1.2
@@ -64,7 +67,7 @@ def board_object_points() -> np.ndarray:
     pts = []
     for row in range(BOARD_ROWS):
         for col in range(BOARD_COLS):
-            pts.append([col * SQUARE_SIZE_M, row * SQUARE_SIZE_M, 0.0])
+            pts.append([col * SQUARE_SIZE_X, row * SQUARE_SIZE_Y, 0.0])
     return np.array(pts, dtype=np.float64)
 
 
@@ -296,15 +299,15 @@ def extract_lidar_board(points: np.ndarray, rng: np.random.Generator, out_dir: s
             lo, sh = max(rw, rh), min(rw, rh)
             band_n = max(int(info.get("band_cc_n", 1)), 1)
             ratio = len(pts) / band_n
-            se = abs(lo - 0.84) / 0.84 + abs(sh - 0.60) / 0.60
-            # 质量门: 裁剪应接近满尺寸 0.84x0.60(下限+误差上限) 且最大联通区域
+            se = abs(lo - BOARD_LONG_M) / BOARD_LONG_M + abs(sh - BOARD_SHORT_M) / BOARD_SHORT_M
+            # 质量门: 裁剪应接近满尺寸 0.799x0.599(下限+误差上限) 且最大联通区域
             # 占比足够(混墙/分割错 -> 占比低; 条带/缩窗 -> 尺寸不对)
-            if lo < 0.78 or sh < 0.54 or se > 0.16 or ratio < 0.85:
+            if lo < 0.74 or sh < 0.54 or se > 0.16 or ratio < 0.85:
                 raise ValueError(
                     f"board quality gate: size {lo*100:.0f}x{sh*100:.0f}cm "
                     f"err {se*100:.0f}% ratio {ratio:.2f}")
             print(f"    [board] segment_board ✓ 实测 {lo*100:.1f}×{sh*100:.1f} cm"
-                  f"(期望 84×60) 占比 {ratio:.2f} → {len(pts)} 点")
+                  f"(期望 80×60) 占比 {ratio:.2f} → {len(pts)} 点")
             write_ply_xyz(os.path.join(out_dir, "dbg_3_plane.ply"), pts)
             return Plane(normal=info["n"], offset=info["d"]), pts
         print(f"    [board] segment_board 只取到 {len(pts)} 点，回退旧路径")
@@ -451,13 +454,13 @@ def detect_camera_plane(image: np.ndarray, K: np.ndarray, dist: np.ndarray
     offset = float(normal @ t)
     if offset < 0.0:
         normal, offset = -normal, -offset
-    board_center = R @ np.array([(BOARD_COLS - 1) / 2 * SQUARE_SIZE_M,
-                                 (BOARD_ROWS - 1) / 2 * SQUARE_SIZE_M, 0.0]) + t
+    board_center = R @ np.array([(BOARD_COLS - 1) / 2 * SQUARE_SIZE_X,
+                                 (BOARD_ROWS - 1) / 2 * SQUARE_SIZE_Y, 0.0]) + t
     paper = np.array([
-        [-SQUARE_SIZE_M, -SQUARE_SIZE_M, 0.0],
-        [BOARD_COLS * SQUARE_SIZE_M, -SQUARE_SIZE_M, 0.0],
-        [BOARD_COLS * SQUARE_SIZE_M, BOARD_ROWS * SQUARE_SIZE_M, 0.0],
-        [-SQUARE_SIZE_M, BOARD_ROWS * SQUARE_SIZE_M, 0.0],
+        [-SQUARE_SIZE_X, -SQUARE_SIZE_Y, 0.0],
+        [BOARD_COLS * SQUARE_SIZE_X, -SQUARE_SIZE_Y, 0.0],
+        [BOARD_COLS * SQUARE_SIZE_X, BOARD_ROWS * SQUARE_SIZE_Y, 0.0],
+        [-SQUARE_SIZE_X, BOARD_ROWS * SQUARE_SIZE_Y, 0.0],
     ])
     polygon, _ = cv2.projectPoints(paper, rvec, tvec, K, dist)
     return (Plane(normal, offset), corners.reshape(-1, 2), -R[:, 1], board_center,
@@ -553,7 +556,7 @@ def largest_component_mask(inliers: np.ndarray, normal: np.ndarray,
 def board_window_mask(inliers: np.ndarray, normal: np.ndarray,
                       width: float = BOARD_WIDTH_M, height: float = BOARD_HEIGHT_M,
                       tol: float = BOARD_TRIM_TOL_M) -> np.ndarray | None:
-    """用最小外接矩形精确贴合板面，并按已知板尺寸 (0.60×0.84 m) 校验。
+    """用最小外接矩形精确贴合板面，并按已知板尺寸 (0.599×0.799 m) 校验。
 
     旧实现是 ±40°/5° 粗搜索 + 直方图上边缘，矩形方向误差可达 2.5°，
     裁出的点集被切歪（PCA 尺寸比真实板大），平面的法向也随之被带偏。

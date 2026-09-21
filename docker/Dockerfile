@@ -55,6 +55,9 @@ RUN apt-get update && apt-get install -y \
     python3-serial \
     && rm -rf /var/lib/apt/lists/*
 
+# ===== 标定工具依赖 (segment_board 用 open3d 体素降采样) =====
+RUN pip install open3d
+
 # ===== 编译 Orbbec 相机驱动 =====
 COPY orbbec-v2-main.tar.gz /tmp/orbbec-v2-main.tar.gz
 RUN set -e && \

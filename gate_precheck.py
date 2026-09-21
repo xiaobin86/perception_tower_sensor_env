@@ -16,7 +16,8 @@ from calibrate_camera_lidar import read_ply_xyz
 from segment_board import extract_rect_plane
 
 RATIO_MIN = 0.85
-SIZE_MIN_L, SIZE_MIN_S, SIZE_ERR_MAX = 0.78, 0.54, 0.16
+BOARD_LONG_M, BOARD_SHORT_M = 0.799, 0.599
+SIZE_MIN_L, SIZE_MIN_S, SIZE_ERR_MAX = 0.74, 0.54, 0.16
 
 
 def main() -> int:
@@ -43,7 +44,7 @@ def main() -> int:
         uv = np.stack([(sel - c0) @ vt[0], (sel - c0) @ vt[1]], axis=1).astype(np.float32)
         _, (rw, rh), _ = cv2.minAreaRect(uv)
         lo, sh = max(rw, rh), min(rw, rh)
-        se = abs(lo - 0.84) / 0.84 + abs(sh - 0.60) / 0.60
+        se = abs(lo - BOARD_LONG_M) / BOARD_LONG_M + abs(sh - BOARD_SHORT_M) / BOARD_SHORT_M
         ratio = info["n_sel"] / max(int(info.get("band_cc_n", 1)), 1)
         ok = lo >= SIZE_MIN_L and sh >= SIZE_MIN_S and se <= SIZE_ERR_MAX and ratio >= RATIO_MIN
         if ok:

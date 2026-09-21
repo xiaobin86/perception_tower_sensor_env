@@ -19,7 +19,8 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from calibrate_camera_lidar import (BOARD_COLS, board_object_points,
+from calibrate_camera_lidar import (BOARD_COLS, BOARD_ROWS, SQUARE_SIZE_X,
+                                    SQUARE_SIZE_Y, board_object_points,
                                     find_board_corners, load_camera_info,
                                     solve_pnp_robust)
 
@@ -55,7 +56,10 @@ def main() -> int:
         rms = float(np.sqrt(((reproj - corners_all[kept]) ** 2).sum(axis=1).mean()))
 
         R, _ = cv2.Rodrigues(rvec)
-        paper = np.array([[-0.12, -0.12, 0], [0.48, -0.12, 0], [0.48, 0.72, 0], [-0.12, 0.72, 0]])
+        paper = np.array([[-SQUARE_SIZE_X, -SQUARE_SIZE_Y, 0],
+                          [BOARD_COLS * SQUARE_SIZE_X, -SQUARE_SIZE_Y, 0],
+                          [BOARD_COLS * SQUARE_SIZE_X, BOARD_ROWS * SQUARE_SIZE_Y, 0],
+                          [-SQUARE_SIZE_X, BOARD_ROWS * SQUARE_SIZE_Y, 0]])
         polygon = cv2.projectPoints(paper, rvec, tvec, K, dist)[0].reshape(-1, 2)
         center_cam = R @ np.array([0.18, 0.30, 0.0]) + tvec.ravel()
         cpx = cv2.projectPoints(center_cam.reshape(1, 3), np.zeros(3), np.zeros(3), K, dist)[0].reshape(2)
