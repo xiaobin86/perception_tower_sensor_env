@@ -303,13 +303,13 @@ def extract_lidar_board(points: np.ndarray, rng: np.random.Generator, out_dir: s
             # 质量门: 裁剪应接近满尺寸 0.799x0.599(下限+误差上限) 且最大联通区域
             # 占比足够(混墙/分割错 -> 占比低; 条带/缩窗 -> 尺寸不对)
             if lo < 0.74 or sh < 0.54 or se > 0.16 or ratio < 0.85:
-                raise ValueError(
-                    f"board quality gate: size {lo*100:.0f}x{sh*100:.0f}cm "
-                    f"err {se*100:.0f}% ratio {ratio:.2f}")
-            print(f"    [board] segment_board ✓ 实测 {lo*100:.1f}×{sh*100:.1f} cm"
-                  f"(期望 80×60) 占比 {ratio:.2f} → {len(pts)} 点")
-            write_ply_xyz(os.path.join(out_dir, "dbg_3_plane.ply"), pts)
-            return Plane(normal=info["n"], offset=info["d"]), pts
+                print(f"    [board] segment_board 质量门未过: size {lo*100:.0f}x{sh*100:.0f}cm "
+                      f"err {se*100:.0f}% ratio {ratio:.2f}，回退旧路径")
+            else:
+                print(f"    [board] segment_board ✓ 实测 {lo*100:.1f}×{sh*100:.1f} cm"
+                      f"(期望 80×60) 占比 {ratio:.2f} → {len(pts)} 点")
+                write_ply_xyz(os.path.join(out_dir, "dbg_3_plane.ply"), pts)
+                return Plane(normal=info["n"], offset=info["d"]), pts
         print(f"    [board] segment_board 只取到 {len(pts)} 点，回退旧路径")
     else:
         print("    [board] segment_board 未找到，回退旧路径")
