@@ -61,7 +61,8 @@ def main() -> int:
                           [BOARD_COLS * SQUARE_SIZE_X, BOARD_ROWS * SQUARE_SIZE_Y, 0],
                           [-SQUARE_SIZE_X, BOARD_ROWS * SQUARE_SIZE_Y, 0]])
         polygon = cv2.projectPoints(paper, rvec, tvec, K, dist)[0].reshape(-1, 2)
-        center_cam = R @ np.array([0.18, 0.30, 0.0]) + tvec.ravel()
+        center_cam = R @ np.array([(BOARD_COLS - 1) / 2 * SQUARE_SIZE_X,
+                                   (BOARD_ROWS - 1) / 2 * SQUARE_SIZE_Y, 0.0]) + tvec.ravel()
         cpx = cv2.projectPoints(center_cam.reshape(1, 3), np.zeros(3), np.zeros(3), K, dist)[0].reshape(2)
 
         vis = img.copy()
