@@ -105,7 +105,8 @@ def main() -> int:
     print(f"\n跨 {len(rows)} 帧中位: 俯仰 = {np.degrees(np.median(D)):+.2f}°   "
           f"**Δt.y = {np.median(Y) * 1000:+.1f}mm**   "
           f"(Δt.y 散布 sigma={np.degrees(0) + Y.std() * 1000:.1f}mm)")
-    print(f"当前配置已含 dy-30mm → 深度云建议总调整 ≈ {-30 + np.median(Y) * 1000:+.1f}mm (相对标定值)")
+    print(f"残差相对当前生效外参 (config/camera_extrinsics.yaml) → 深度云建议 t.y 调整 ≈ "
+          f"{np.median(Y) * 1000:+.1f}mm (相对标定值)")
     return 0
 
 
