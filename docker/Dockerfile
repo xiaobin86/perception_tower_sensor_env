@@ -58,6 +58,11 @@ RUN apt-get update && apt-get install -y \
 # ===== 标定工具依赖: open3d (走清华镜像加速; 层缓存命中后重建不再下载) =====
 RUN pip install open3d -i https://pypi.tuna.tsinghua.edu.cn/simple
 
+# ===== 相机内参标定工具 (cameracalibrator.py) =====
+RUN apt-get update && apt-get install -y \
+    ros-${ROS_DISTRO}-camera-calibration \
+    && rm -rf /var/lib/apt/lists/*
+
 # ===== 编译 Orbbec 相机驱动 =====
 COPY orbbec-v2-main.tar.gz /tmp/orbbec-v2-main.tar.gz
 RUN set -e && \
