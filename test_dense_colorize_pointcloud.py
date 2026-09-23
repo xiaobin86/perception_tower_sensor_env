@@ -98,7 +98,7 @@ class TestDenseColorizeEndToEnd(unittest.TestCase):
                 yaml.safe_dump({"lidar_to_camera": {"rotation_matrix": np.eye(3).tolist(),
                                                     "translation": [0.0, 0.0, 0.0]}}, f)
 
-            out, n_pts, coverage = dense_colorize(
+            out, n_pts, coverage, _ = dense_colorize(
                 pose, os.path.join(pose, "ext.yaml"), os.path.join(pose, "cam.yaml"),
                 photo_angle=0.0, dilate=True, max_fill_px=3.0, output="dense.ply")
             self.assertGreater(coverage, 0.85)  # 稀疏点经膨胀+填补后覆盖率应很高
@@ -137,7 +137,7 @@ class TestIndexMap(unittest.TestCase):
                 yaml.safe_dump({"lidar_to_camera": {"rotation_matrix": np.eye(3).tolist(),
                                                     "translation": [0.0, 0.0, 0.0]}}, f)
 
-            out, n, _ = dense_colorize(
+            out, n, _, _ = dense_colorize(
                 pose, os.path.join(pose, "ext.yaml"), os.path.join(pose, "cam.yaml"),
                 photo_angle=0.0, output="dense.ply", save_index_map=True)
             index_map = np.load(os.path.join(pose, "dense_index.npy"))
@@ -163,6 +163,33 @@ class TestIndexMap(unittest.TestCase):
                 np.testing.assert_array_equal(colors[index_map[v, u]], img[v, u][::-1])
             # 无效位为 -1 且出现在无效像素上
             self.assertTrue((index_map[~valid] == -1).all())
+
+
+class TestBijectionCheck(unittest.TestCase):
+    def test_output_is_one_point_per_pixel(self) -> None:
+        h, w = 40, 50
+        with tempfile.TemporaryDirectory() as pose:
+            cv2.imwrite(os.path.join(pose, "color.png"), gradient_image(h, w))
+            K = np.array([[100.0, 0.0, (w - 1) / 2], [0.0, 100.0, (h - 1) / 2], [0.0, 0.0, 1.0]])
+            us, vs = np.meshgrid(np.arange(2, w - 2, 3.0), np.arange(2, h - 2, 3.0))
+            xs = (us.ravel() - K[0, 2]) * 2.0 / K[0, 0]
+            ys = (vs.ravel() - K[1, 2]) * 2.0 / K[1, 1]
+            points = np.column_stack([xs, ys, np.full(len(us.ravel()), 2.0)])
+            write_ply_rgb(os.path.join(pose, "merged.ply"), points,
+                          np.full((len(points), 3), 30, dtype=np.uint8))
+            import yaml
+            with open(os.path.join(pose, "cam.yaml"), "w") as f:
+                yaml.safe_dump({"k": K.ravel().tolist(), "d": [0.0] * 5}, f)
+            with open(os.path.join(pose, "ext.yaml"), "w") as f:
+                yaml.safe_dump({"lidar_to_camera": {"rotation_matrix": np.eye(3).tolist(),
+                                                    "translation": [0.0, 0.0, 0.0]}}, f)
+
+            out, n, cov, check = dense_colorize(
+                pose, os.path.join(pose, "ext.yaml"), os.path.join(pose, "cam.yaml"),
+                photo_angle=0.0, output="dense.ply")
+            self.assertTrue(check["ok"])
+            self.assertEqual(check["unique_pixels"], n)
+            self.assertLess(check["max_offset_px"], 0.05)
 
 
 if __name__ == "__main__":

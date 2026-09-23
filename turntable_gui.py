@@ -980,12 +980,15 @@ class TurntableGuiController(Node):
             self.log(f"Colorize failed: {exc}")
         try:
             from dense_colorize_pointcloud import dense_colorize
-            dense_out, n, cov = dense_colorize(
+            dense_out, n, cov, check = dense_colorize(
                 out_dir, extrinsics, camera_info, photo_angle_deg,
                 min_dist=self._min_dist,
                 max_dist=self._max_dist if self._max_dist is not None else 3.0,
                 save_index_map=True)
-            self.log(f"Dense RGBD cloud saved: {dense_out} ({n} points, coverage {cov:.1%})")
+            verdict = "PASS" if check["ok"] else "FAIL"
+            self.log(f"Dense RGBD cloud saved: {dense_out} ({n} points, coverage {cov:.1%}, "
+                     f"1:1 pixel↔point {verdict}, max reprojection offset "
+                     f"{check['max_offset_px']:.4f}px)")
         except Exception as exc:
             self.log(f"Dense colorize failed: {exc}")
 

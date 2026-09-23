@@ -80,12 +80,34 @@ def unproject(depth: np.ndarray, valid: np.ndarray, K: np.ndarray,
     return rays * (z / rays[:, 2])[:, None]
 
 
+def check_bijection(pts_cam: np.ndarray, src_uv: np.ndarray, K: np.ndarray,
+                    dist: np.ndarray) -> dict:
+    """Reproject the dense cloud back to the image and verify a strict pixel<->point bijection.
+
+    Checks (1) every point lands back on its source pixel (sub-pixel reprojection error)
+    and (2) no two points share a pixel.
+    """
+    proj, _ = cv2.projectPoints(pts_cam, np.zeros(3), np.zeros(3), K, dist)
+    proj = proj.reshape(-1, 2)
+    offset = float(np.abs(proj - src_uv).max()) if len(proj) else 0.0
+    h, w = int(src_uv[:, 1].max()) + 1, int(src_uv[:, 0].max()) + 1
+    pix_idx = np.round(proj).astype(np.int64)[:, 1] * w + np.round(proj).astype(np.int64)[:, 0]
+    unique_pixels = int(np.unique(pix_idx).size)
+    ok = (unique_pixels == len(pts_cam)) and (offset < 0.5) and \
+         (np.abs(proj - np.round(proj)).max() < 0.5 if len(proj) else True)
+    return {"ok": bool(ok), "unique_pixels": unique_pixels, "n_points": len(pts_cam),
+            "max_offset_px": offset}
+
+
 def dense_colorize(pose_dir: str, extrinsics_path: str, camera_info_path: str,
                    photo_angle: float, dilate: bool = True, max_fill_px: float = 3.0,
                    min_dist: float = 0.2, max_dist: float = 3.0,
                    output: str = "dense_colored.ply",
-                   save_index_map: bool = False) -> tuple[str, int, float]:
-    """Build a dense RGBD cloud from merged.ply + color.png. Returns (path, n_points, coverage)."""
+                   save_index_map: bool = False) -> tuple[str, int, float, dict]:
+    """Build a dense RGBD cloud from merged.ply + color.png.
+
+    Returns (path, n_points, coverage, bijection_check). The check reprojects the output
+    back to the image and confirms each point sits on its own source pixel exactly 1:1."""
     K, dist = load_camera_info(camera_info_path)
     R, t = load_extrinsics(extrinsics_path)
     image = cv2.imread(os.path.join(pose_dir, "color.png"))
@@ -113,6 +135,9 @@ def dense_colorize(pose_dir: str, extrinsics_path: str, camera_info_path: str,
     filled, valid = fill_holes_nearest(depth, max_fill_px)
 
     pts_cam = unproject(filled, valid, K, dist)
+    us_grid, vs_grid = np.meshgrid(np.arange(w, dtype=np.float64), np.arange(h, dtype=np.float64))
+    src_uv = np.column_stack([us_grid[valid], vs_grid[valid]])
+    check = check_bijection(pts_cam, src_uv, K, dist)
     R_wc = R_full.T  # world(photo-frame lidar) = R^T * cam
     pts_world = (R_wc @ pts_cam.T).T - (R_wc @ t)
     colors = image[valid][:, ::-1]
@@ -124,7 +149,7 @@ def dense_colorize(pose_dir: str, extrinsics_path: str, camera_info_path: str,
         index_map = np.full((h, w), -1, dtype=np.int32)
         index_map[valid] = np.arange(len(pts_world), dtype=np.int32)
         np.save(os.path.join(pose_dir, os.path.splitext(output)[0] + "_index.npy"), index_map)
-    return out_path, len(pts_world), float(valid.mean())
+    return out_path, len(pts_world), float(valid.mean()), check
 
 
 def main() -> int:
@@ -144,13 +169,16 @@ def main() -> int:
                         help="额外输出 <output去扩展名>_index.npy (HxW int32, 像素→PLY行号, -1=无点)")
     args = parser.parse_args()
 
-    out, n, cov = dense_colorize(args.pose_dir, args.extrinsics, args.camera_info,
-                                 args.photo_angle, dilate=not args.no_dilate,
-                                 max_fill_px=args.max_fill_px, min_dist=args.min_dist,
-                                 max_dist=args.max_dist, output=args.output,
-                                 save_index_map=args.save_index_map)
-    print(f"{args.pose_dir}: {n} dense points, pixel coverage {cov:.1%} -> {out}")
-    return 0
+    out, n, cov, check = dense_colorize(args.pose_dir, args.extrinsics, args.camera_info,
+                                        args.photo_angle, dilate=not args.no_dilate,
+                                        max_fill_px=args.max_fill_px, min_dist=args.min_dist,
+                                        max_dist=args.max_dist, output=args.output,
+                                        save_index_map=args.save_index_map)
+    verdict = ("PASS" if check["ok"] else "FAIL")
+    print(f"{args.pose_dir}: {n} dense points, pixel coverage {cov:.1%}, "
+          f"1:1像素↔点校验{verdict} (唯一像素{check['unique_pixels']}/{check['n_points']}, "
+          f"最大回投偏差{check['max_offset_px']:.4f}px) -> {out}")
+    return 0 if check["ok"] else 1
 
 
 if __name__ == "__main__":
