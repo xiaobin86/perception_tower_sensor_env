@@ -95,12 +95,34 @@ rectified; pre-zeroing coefficients are in `config/camera_info.yaml.bak_withdist
 passes `d` through `cv2.projectPoints`, so restoring them needs no code change); board is 8×6 inner
 corners, rectangular 88.75×85.5 mm squares (SQUARE_SIZE_X/Y in `calibrate_camera_lidar.py`).
 
-**Official extrinsics (current — 116 mm board era, restored 2026-09-21 evening)** = solve over the
-16 good `20260918_*` poses (073749 wide-scan excluded, 062814 auto-skipped: no checkerboard),
+**Official extrinsics (current — 2026-09-24, MATLAB 标定版, 用户指定)** =
+MATLAB `lidarCameraTform`（用户 2026-09-24 解算，**4 位有效数字**）换算到照片位姿约定：
+`R = R_matlab·Rz(−90°)`（角度 0 参考系 → 照片位姿参考系），`t = [0.0263, 0.0590, −0.0198]`。
+原始 MATLAB 矩阵与换算说明存于 `config/camera_extrinsics.yaml` 的 `matlab_source` 字段。
+注意：(1) 源内参为 MATLAB 拟合值（fx 610.75 / fy 625.63 / cx 652.81 / cy 373.98），渲染仍用
+`config/camera_info.yaml`（fy 611.375），两者非同一内参组；(2) 4 位有效数字引入的量化
+约 ±0.05 mm/±0.05° 量级误差。所有 `20260923_*` 的 colored.ply 与 dense_colored.ply 已用此版刷新；
+`colored_mlab.ply` 为同参数的旁路对照（photo=0 直渲，内容应与 colored.ply 等价）。
+
+**Official extrinsics (2026-09-23 Python 重解版, SUPERSEDED, archived)** = raw solve over the
+11 good `20260923_*` poses (19 captured; 070238 no board plane, 070700/070957/
+072937 no checkerboard, 070807/071405/071705 sparse board, 073136 >2 bad corners), new board
+(88.75×85.5 mm), fy = 611.375 factory, distortion zeroed: `t = [0.0264, 0.0734, 0.0317]`,
+R = solve, **no tweaks**. Diagnostics: up = [0.01, −0.818, −0.576], |Δ| = 14.0 px,
+normal-angle err rms 0.68°, 落格率 97–100%. Key fact: the user confirmed the camera pitch was
+physically adjusted between the 0918 era and 0923 — this explains the ~12° pitch difference vs
+the 0918-era extrinsics. Archived:
+`config/extrinsics_history/20260924_021045_0923solve_before_matlab.yaml`.
+深度云审计 (audit_tz_extrinsics.py, 对上一版 MATLAB t.z=−0.078): 此版胜
+(加权 RMS 27 vs 40 mm, 去偏 std 18 vs 38 mm, 22/24 帧) — 注意被审计的 MATLAB 版
+已非当前 MATLAB 版 (t.z 已改 −0.0198)。
+
+**0918-era extrinsics (SUPERSEDED, archived)** = solve over the 16 good `20260918_*` poses
+(073749 wide-scan excluded, 062814 auto-skipped: no checkerboard),
 SQUARE_SIZE_M=0.116 实测格距, plus the keyboard eye-validated roll tweak (R = solve·Ry(roll),
 tune_rotation_live.py): `t = [0.0293, 0.0556, −0.0140]`, R = solve + **roll −0.9°**. Identical copy:
-`config/extrinsics_history/20260921_070000_before_recalib.yaml`. Restoration rationale: the
-same-day 21-pose re-solve was rejected by a multi-frame full-scene eye check (see below).
+`config/extrinsics_history/20260921_070000_before_recalib.yaml`. Only valid for data captured
+before the camera-pitch adjustment.
 
 **2026-09-21 re-solve (REJECTED, archived)** = raw solve over 17 good `20260921_*` poses
 (different-distance set; 042647/042731 no checkerboard, 060302/060448 board size gate), new standard
@@ -117,8 +139,10 @@ user's ruler says new-board X pitch is 88.5 mm (code/this file: 88.75, +0.28%) �
 Δt.x, not the main term of the 44 mm. Archived:
 `config/extrinsics_history/20260921_220535_20260921_solve_rejected.yaml`.
 Diff vs current: ΔR = 0.74° (mainly pitch +0.65°), Δt = [−5.8, +29.3, +32.7] mm, concentrated in
-the board-weak t.y/pitch subspace (install unchanged since 0918 — 116 fitting 21号 scenes better
-than the 21号 solve itself proves the rig did not move).
+the board-weak t.y/pitch subspace. NOTE (2026-09-23 update): the "install unchanged since 0918 —
+the rig did not move" claim in the original text is **superseded** — the user confirmed the camera
+pitch was physically adjusted, so this solve's deviation is no longer evidence against it; the 21号
+eye-check rejection stands only for the pre-adjustment era.
 
 ### Version-selection logic (why this exact extrinsic is official)
 
@@ -187,6 +211,10 @@ misleading (and even the depth cloud can be fooled by parallax systematics, see 
   center) + bad-corner statistics over any frame list; uses the same rejection policy as calibration.
 - `solve_ty_residual.py` / `solve_pitch_residual.py` — depth-cloud residual solvers for Δt.y and
   pitch (use for measurement; verify before applying, see version-selection logic step 4).
+- `audit_tz_extrinsics.py` — depth-cloud head-to-head arbitration between two candidate
+  extrinsics (official 0923 vs MATLAB lidarCameraTform, photo=0 frame): per-frame robust RMS of
+  z_lidar − D_depth; 2026-09-23 result: official wins (weighted RMS 27 vs 40 mm, bias-free std
+  18 vs 38 mm, 22/24 frames).
 - `verify_board.py` — project the segmented board into the photo and score quad overlap with the
   detected checkerboard (camera-as-reference frame audit).
 - `run_calibration.sh` — recompute the official extrinsics from every `turntable_output/calib_*` into
