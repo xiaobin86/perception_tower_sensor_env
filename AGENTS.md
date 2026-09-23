@@ -95,12 +95,30 @@ rectified; pre-zeroing coefficients are in `config/camera_info.yaml.bak_withdist
 passes `d` through `cv2.projectPoints`, so restoring them needs no code change); board is 8×6 inner
 corners, rectangular 88.75×85.5 mm squares (SQUARE_SIZE_X/Y in `calibrate_camera_lidar.py`).
 
-**Official extrinsics (2026-09-20)** = solve over the 16 good `20260918_*` poses (073749 wide-scan
-excluded, 062814 auto-skipped: no checkerboard), plus the eye/deepth-validated `t.y` offset (see
-version-selection logic below): `t = [0.02917, 0.060, −0.01006]`,
-   R = solve + **roll −0.9°** (all post-solve tweaks eye-validated via
-   `tune_rotation_live.py` keyboard tuning on the last frame: dy +30 mm, dz −70 mm, roll −0.9°). Earlier backups were removed on
-purpose; `run_calibration.sh` still rebuilds from `turntable_output/calib_*` when those exist.
+**Official extrinsics (current — 116 mm board era, restored 2026-09-21 evening)** = solve over the
+16 good `20260918_*` poses (073749 wide-scan excluded, 062814 auto-skipped: no checkerboard),
+SQUARE_SIZE_M=0.116 实测格距, plus the keyboard eye-validated roll tweak (R = solve·Ry(roll),
+tune_rotation_live.py): `t = [0.0293, 0.0556, −0.0140]`, R = solve + **roll −0.9°**. Identical copy:
+`config/extrinsics_history/20260921_070000_before_recalib.yaml`. Restoration rationale: the
+same-day 21-pose re-solve was rejected by a multi-frame full-scene eye check (see below).
+
+**2026-09-21 re-solve (REJECTED, archived)** = raw solve over 17 good `20260921_*` poses
+(different-distance set; 042647/042731 no checkerboard, 060302/060448 board size gate), new standard
+board (88.75×85.5 mm), original fy, distortion zeroed: `t = [0.0235, 0.0849, 0.0187]`,
+R = solve, no tweaks. Re-solved the same evening: reproduced the morning result **bit-exactly**
+(deterministic pipeline, healthy diagnostics: up ≈ [0, −0.91, −0.41], |Δ| ≈ 12 px).
+Rejection judge: multi-frame full-scene eye matrix on 085156 — 2×2 {this solve, 116} ×
+{fy 590.59, fy 611.375}; **116+fy611 won**. Why the quantitative judges could not arbitrate:
+board-overlap is structurally blind to fy (camera-side PnP quad reuses the same K, errors cancel)
+and insensitive to 0.74°; depth-cloud Δt.y neutral for both (±1.5 mm); depth-cloud pitch residual
+(+1.7~3.4° for this solve, ≈0 for 116) **fails the falsification test** (RMS 23→42 mm, residual
+reappears +3.8° — D2C parallax systematic, same signature as the historic +3.86°). Open lead:
+user's ruler says new-board X pitch is 88.5 mm (code/this file: 88.75, +0.28%) — worth ~6 mm of
+Δt.x, not the main term of the 44 mm. Archived:
+`config/extrinsics_history/20260921_220535_20260921_solve_rejected.yaml`.
+Diff vs current: ΔR = 0.74° (mainly pitch +0.65°), Δt = [−5.8, +29.3, +32.7] mm, concentrated in
+the board-weak t.y/pitch subspace (install unchanged since 0918 — 116 fitting 21号 scenes better
+than the 21号 solve itself proves the rig did not move).
 
 ### Version-selection logic (why this exact extrinsic is official)
 
@@ -146,6 +164,14 @@ misleading (and even the depth cloud can be fooled by parallax systematics, see 
    是标定后的第一道审计。预测-验证闭环：理论预测 tz 吸收 +54mm ≈ 人眼微调 −50mm；
    改 `SQUARE_SIZE_M=0.116` 后裸解与全套人工微调版差 <4mm —— 根因确认。
 4. 完整推导与配图：`docs/tz_bias_analysis.md` + `docs/fig1~4_*.png`（`make_tz_figs.py` 生成）。
+5. **被目测评判否掉的修正严禁回写配置**：2026-09-21 上午四组合目测已否掉 fy×0.966，当日
+   14:48 它仍被写进 `config/camera_info.yaml`（fy 590.59），而外参是 07:00 在 fy=611.375 下
+   解算的 —— 14:48 之后所有"当前外参"渲染都与求解内参不自洽（垂直方向 ~3.4% 投影畸变，
+   边缘约 20px），当天大批对比结论被污染。规则：判定/渲染用内参与求解用内参必须一致；
+   改内参后必须重解外参再对比。
+6. **单帧目测选版不可靠**：9-21 上午仅凭 064431 单帧四选一就采纳了 21 号裸解；当晚用
+   085156 实际场景做 2×2 多帧对比即被推翻（116+fy611 胜）。外参选版判决必须用多帧、
+   实际采集场景（最好含不同距离/朝向），单帧标定位姿上的差异常常展不开。
 
 ## Existing helper scripts
 
