@@ -83,7 +83,8 @@ def unproject(depth: np.ndarray, valid: np.ndarray, K: np.ndarray,
 def dense_colorize(pose_dir: str, extrinsics_path: str, camera_info_path: str,
                    photo_angle: float, dilate: bool = True, max_fill_px: float = 3.0,
                    min_dist: float = 0.2, max_dist: float = 3.0,
-                   output: str = "dense_colored.ply") -> tuple[str, int, float]:
+                   output: str = "dense_colored.ply",
+                   save_index_map: bool = False) -> tuple[str, int, float]:
     """Build a dense RGBD cloud from merged.ply + color.png. Returns (path, n_points, coverage)."""
     K, dist = load_camera_info(camera_info_path)
     R, t = load_extrinsics(extrinsics_path)
@@ -118,6 +119,11 @@ def dense_colorize(pose_dir: str, extrinsics_path: str, camera_info_path: str,
 
     out_path = os.path.join(pose_dir, output)
     write_ply_rgb(out_path, pts_world, colors)
+    if save_index_map:
+        # HxW int32: 有效像素 → PLY 行号(光栅序), 无效 → -1; 供图像 mask(YOLO seg 等)直接查点云区域
+        index_map = np.full((h, w), -1, dtype=np.int32)
+        index_map[valid] = np.arange(len(pts_world), dtype=np.int32)
+        np.save(os.path.join(pose_dir, os.path.splitext(output)[0] + "_index.npy"), index_map)
     return out_path, len(pts_world), float(valid.mean())
 
 
@@ -134,12 +140,15 @@ def main() -> int:
     parser.add_argument("--min-dist", type=float, default=0.2)
     parser.add_argument("--max-dist", type=float, default=3.0)
     parser.add_argument("--output", default="dense_colored.ply")
+    parser.add_argument("--save-index-map", action="store_true",
+                        help="额外输出 <output去扩展名>_index.npy (HxW int32, 像素→PLY行号, -1=无点)")
     args = parser.parse_args()
 
     out, n, cov = dense_colorize(args.pose_dir, args.extrinsics, args.camera_info,
                                  args.photo_angle, dilate=not args.no_dilate,
                                  max_fill_px=args.max_fill_px, min_dist=args.min_dist,
-                                 max_dist=args.max_dist, output=args.output)
+                                 max_dist=args.max_dist, output=args.output,
+                                 save_index_map=args.save_index_map)
     print(f"{args.pose_dir}: {n} dense points, pixel coverage {cov:.1%} -> {out}")
     return 0
 

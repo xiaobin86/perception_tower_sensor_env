@@ -118,5 +118,52 @@ class TestDenseColorizeEndToEnd(unittest.TestCase):
             np.testing.assert_array_equal(colors[:, 2], 128)
 
 
+class TestIndexMap(unittest.TestCase):
+    def test_index_map_points_to_correct_rows(self) -> None:
+        h, w = 60, 80
+        with tempfile.TemporaryDirectory() as pose:
+            cv2.imwrite(os.path.join(pose, "color.png"), gradient_image(h, w))
+            K = np.array([[100.0, 0.0, (w - 1) / 2], [0.0, 100.0, (h - 1) / 2], [0.0, 0.0, 1.0]])
+            us, vs = np.meshgrid(np.arange(2, w - 2, 4.0), np.arange(2, h - 2, 4.0))
+            xs = (us.ravel() - K[0, 2]) * 2.0 / K[0, 0]
+            ys = (vs.ravel() - K[1, 2]) * 2.0 / K[1, 1]
+            points = np.column_stack([xs, ys, np.full(len(us.ravel()), 2.0)])
+            write_ply_rgb(os.path.join(pose, "merged.ply"), points,
+                          np.full((len(points), 3), 30, dtype=np.uint8))
+            import yaml
+            with open(os.path.join(pose, "cam.yaml"), "w") as f:
+                yaml.safe_dump({"k": K.ravel().tolist(), "d": [0.0] * 5}, f)
+            with open(os.path.join(pose, "ext.yaml"), "w") as f:
+                yaml.safe_dump({"lidar_to_camera": {"rotation_matrix": np.eye(3).tolist(),
+                                                    "translation": [0.0, 0.0, 0.0]}}, f)
+
+            out, n, _ = dense_colorize(
+                pose, os.path.join(pose, "ext.yaml"), os.path.join(pose, "cam.yaml"),
+                photo_angle=0.0, output="dense.ply", save_index_map=True)
+            index_map = np.load(os.path.join(pose, "dense_index.npy"))
+            self.assertEqual(index_map.shape, (h, w))
+            self.assertEqual(index_map.dtype, np.int32)
+
+            with open(out) as f:
+                for header_lines, line in enumerate(f, start=1):
+                    if line.strip() == "end_header":
+                        break
+            data = np.loadtxt(out, skiprows=header_lines)
+            colors = data[:, 3:6]
+            valid = index_map >= 0
+            self.assertEqual(valid.sum(), n)
+            # index_map 指向的 PLY 行必须恰好是按光栅序排列的: 第 k 个有效像素 → 第 k 行
+            rows = index_map[valid]
+            np.testing.assert_array_equal(rows, np.arange(n))
+            # 抽查若干像素: 该像素颜色 == PLY 对应行颜色
+            img = gradient_image(h, w)
+            for v, u in [(10, 2), (30, 40), (50, 77)]:
+                if not valid[v, u]:
+                    continue
+                np.testing.assert_array_equal(colors[index_map[v, u]], img[v, u][::-1])
+            # 无效位为 -1 且出现在无效像素上
+            self.assertTrue((index_map[~valid] == -1).all())
+
+
 if __name__ == "__main__":
     unittest.main()
