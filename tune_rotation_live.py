@@ -12,8 +12,8 @@
   x       退出 (微调不写入正式外参)
 
 用法(需交互式终端):
-  docker exec -it silly_bell bash -lc 'cd /workspace && python3 tune_rotation_live.py'
-  (容器名以 docker ps 实际为准; 数据帧目录默认取 turntable_output/20260918_* 最后一帧)
+  docker exec -it <容器名> bash -lc 'cd /workspace && python3 tune_rotation_live.py turntable_output/20260921_064431'
+  (不传帧目录时默认取 turntable_output/20260918_* 最后一帧)
 """
 
 import contextlib
@@ -53,12 +53,29 @@ def rot_z(deg: float) -> np.ndarray:
 
 
 def main() -> int:
-    dirs = sorted(glob.glob("turntable_output/20260918_*"))
-    dirs = [d for d in dirs if os.path.exists(os.path.join(d, "merged.ply"))]
-    if not dirs:
-        print("未找到数据帧")
+    import argparse
+    parser = argparse.ArgumentParser(description="键盘微调外参并实时重渲染 colored.ply")
+    parser.add_argument("pose_dir", nargs="?", default=None,
+                        help="数据帧目录 (默认 turntable_output/20260918_* 最后一帧)")
+    args = parser.parse_args()
+    sys.stdout.reconfigure(line_buffering=True)
+    if not sys.stdin.isatty():
+        print("错误: stdin 不是交互式终端。需要 TTY, 例如:")
+        print("  docker exec -it <容器名> bash -lc "
+              "'cd /workspace && python3 tune_rotation_live.py turntable_output/20260921_064431'")
         return 1
-    pose = dirs[-1]
+    if args.pose_dir:
+        pose = args.pose_dir
+        if not os.path.exists(os.path.join(pose, "merged.ply")):
+            print(f"{pose}: merged.ply 不存在")
+            return 1
+    else:
+        dirs = sorted(glob.glob("turntable_output/20260918_*"))
+        dirs = [d for d in dirs if os.path.exists(os.path.join(d, "merged.ply"))]
+        if not dirs:
+            print("未找到数据帧")
+            return 1
+        pose = dirs[-1]
     ex = yaml.safe_load(open(BASE_EXTRINSICS))["lidar_to_camera"]
     R0 = np.array(ex["rotation_matrix"]).reshape(3, 3)
     t = np.array(ex["translation"])
