@@ -21,9 +21,12 @@ from colorize_pointcloud import load_camera_info, load_extrinsics, rotation_z
 
 def main() -> int:
     K, dist = load_camera_info("config/camera_info.yaml")
-    R, t = load_extrinsics("config/camera_extrinsics.yaml")
+    argv = [a for a in sys.argv[1:] if not a.startswith("--extrinsics=")]
+    extr_path = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--extrinsics=")),
+                     "config/camera_extrinsics.yaml")
+    R, t = load_extrinsics(extr_path)
     objp = board_object_points()
-    dirs = sys.argv[1:] or sorted(glob.glob("turntable_output/20260918_0*"))[:-1]
+    dirs = argv or sorted(glob.glob("turntable_output/20260918_0*"))[:-1]
 
     print(f"{'帧':<12}{'分割点数':>8}{'重合率':>8}  判定")
     for d in dirs:
