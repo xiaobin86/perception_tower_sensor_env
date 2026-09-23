@@ -279,10 +279,11 @@ perception_tower_sensor_env/
 
 | 脚本 | 作用 |
 |------|------|
-| `turntable_gui.py` | 转台扫描 GUI: 扫描→合并→自动上色(`colorize_pointcloud`)→自动找板(`segment_board`) |
+| `turntable_gui.py` | 转台扫描 GUI: 扫描→合并→自动上色(`colorize_pointcloud`)→稠密RGBD(`dense_colorize_pointcloud`)→自动找板(`segment_board`) |
 | `segment_board.py` | LiDAR 标定板分割: 去地面→多种子RANSAC(±2cm)→SVD精修→两段式滑窗(环带评分)→带内最大连通域→质量门。阈值集中在文件头配置块 |
 | `calibrate_camera_lidar.py` | 相机-LiDAR 外参标定: 相机侧棋盘格PnP(坏角点>2.5px剔除, >2个整帧踢)+雷达侧segment_board→法向Kabsch解R+板中心差解t+图像空间精修 |
-| `colorize_pointcloud.py` | 按外参把 merged.ply 投影到 color.png 生成 colored.ply |
+| `colorize_pointcloud.py` | 按外参把 merged.ply 投影到 color.png 生成 colored.ply(默认亚像素双线性取色, `--sampling=nearest` 为旧行为) |
+| `dense_colorize_pointcloud.py` | LiDAR→RGBD D2C: min-z溅射+2x2膨胀+最近邻空洞填补→反投影稠密彩色点云; `--save-index-map` 输出像素→PLY行号索引(HxW int32, YOLO seg mask 可直接查点云区域) |
 | `tune_rotation_live.py` | 键盘微调外参(yaw/pitch/roll 每次0.2°, tx/ty/tz 每次10mm), 每次按键重渲染最后一帧 colored.ply 供目测; 不写入正式外参 |
 | `install_config.py` | 雷达安装姿态配置(装载方式/轴向/to_world映射/偏心补偿), GUI 每次扫描现读 |
 | `lakibeam_viewer.py` | LakiBeam UDP 点云接收 + 实时查看(MSOP 协议) |
