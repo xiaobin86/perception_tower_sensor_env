@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<!--
+  雷达安装姿态 / 偏心 offset 三维示意图（单文件 · 无外部依赖 · 离线双击即可打开）
+
+  数据来源 : config/install_side_mount.yaml
+             ⚠️ 改完 YAML 请同步改下面脚本里的 CFG 常量
+             （浏览器在 file:// 下不允许直接读本地 yaml，所以只能手抄一份）
+  关键约定 : to_world 的“键 = 世界轴，值 = 雷达轴”
+             即 toWorld.x 表示“世界的 x 轴取自雷达系的哪个轴”
+  交互     : 左键拖拽 = 旋转视角 · 滚轮 = 缩放 · 右键/Shift+左键 = 平移
+  URL 参数 : ?y=&z= (偏心, 米)   ?a= (棱镜相位°, 可负)   ?x=&y=&z= (安装姿态)
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>雷达安装姿态与偏心 offset（按 install_side_mount.yaml）</title>
+<style>
+  :root{--bg:#0e1015;--panel:#151924;--line:#242a38;--fg:#e9ecf3;--dim:#8b93a7;}
+  *{box-sizing:border-box;}
+  html,body{height:100%;}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.65 -apple-system,"Segoe UI",system-ui,"Microsoft YaHei",sans-serif;}
+  #wrap{display:flex;flex-direction:column;height:100%;}
+  #top{padding:10px 16px;border-bottom:1px solid var(--line);display:flex;gap:14px;
+       align-items:baseline;flex-wrap:wrap;}
+  #top h1{font-size:15px;margin:0;font-weight:650;letter-spacing:.2px;}
+  #top .tag{color:var(--dim);font-size:12.5px;font-family:ui-monospace,Consolas,monospace;}
+  #main{flex:1;display:flex;min-height:0;}
+  #cv{flex:1;display:block;cursor:grab;touch-action:none;}
+  #cv.drag{cursor:grabbing;}
+  #side{width:372px;max-width:45vw;border-left:1px solid var(--line);background:var(--panel);
+        padding:14px 16px 40px;overflow:auto;font-size:13px;}
+  #side h2{font-size:13px;margin:16px 0 6px;color:#cfd6e6;font-weight:650;}
+  #side h2:first-child{margin-top:0;}
+  #side p,#side li{color:#c3cad9;margin:4px 0;}
+  #side ul{padding-left:18px;margin:6px 0;}
+  code{background:#0b0d12;border:1px solid var(--line);border-radius:4px;
+       padding:1px 5px;font-family:ui-monospace,Consolas,monospace;font-size:12px;color:#9fd0ff;}
+  table{width:100%;border-collapse:collapse;margin:6px 0;font-size:12.5px;}
+  th,td{border-bottom:1px solid var(--line);padding:4px 6px;text-align:left;vertical-align:top;}
+  th{color:var(--dim);font-weight:600;}
+  .k{color:#ffd166;font-family:ui-monospace,Consolas,monospace;}
+  .g{color:#7bd88f;} .r{color:#ff7b72;} .b{color:#79c0ff;}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin:8px 0 2px;}
+  .legend span{display:inline-flex;align-items:center;gap:5px;color:#c3cad9;font-size:12.5px;}
+  .sw{width:12px;height:3px;border-radius:2px;display:inline-block;}
+  .box{background:#0b0d12;border:1px solid var(--line);border-radius:6px;padding:8px 10px;
+       font-family:ui-monospace,Consolas,monospace;font-size:12.5px;color:#9fd0ff;
+       white-space:pre-wrap;margin:6px 0;}
+  input[type=number]{width:88px;background:#0b0d12;color:#e9ecf3;border:1px solid var(--line);
+       border-radius:4px;padding:3px 6px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;}
+  button{background:#1d2433;color:#e9ecf3;border:1px solid var(--line);border-radius:5px;
+       padding:4px 10px;font-size:12.5px;cursor:pointer;}
+  button:hover{background:#25304a;}
+  label.ck{display:inline-flex;gap:5px;align-items:center;color:#c3cad9;font-size:12.5px;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="top">
+    <h1>雷达安装姿态 与 偏心 offset 三维示意</h1>
+    <span class="tag" id="tag"></span>
+  </div>
+  <div id="main">
+    <canvas id="cv"></canvas>
+    <aside id="side">
+      <h2>一句话结论</h2>
+      <p><span class="k">offset</span> = <b>雷达光心（LiDAR 原点）相对"转盘旋转轴"的位置偏移</b>，
+         写在<b>雷达系自己的 y / z</b> 两个方向上（单位：米）。</p>
+      <p>合并时它被"加回每个点"，等价于把光心摆到旋转轴上。</p>
+
+      <h2>图上有什么</h2>
+      <ul>
+        <li><b>世界系</b>（粗三轴，原点在转轴上）：<br>
+            <span class="r">X 红</span>、<span class="g">Y 绿</span>=水平（旋转平面内）<br>
+            <span class="b">Z 蓝</span>=<b>转盘旋转轴（竖直）</b></li>
+        <li><b>蓝色圆盘</b>=转盘旋转平面（世界 X-Y 平面），偏心一定落在这个平面里。</li>
+        <li><b>雷达系</b>（细三轴，画在雷达光心处）：<br>
+            x=0° 波束方向　y=90° 波束方向　z=扫描面法向（镜头轴）</li>
+        <li><b><span class="k">黄色箭头</span></b>=offset 向量（从转轴指向光心）。</li>
+        <li><b>虚线</b>=offset 的两个分量。</li>
+      </ul>
+
+      <h2>安装方式</h2>
+      <p><select id="selMount" style="width:100%;background:#0b0d12;color:#e9ecf3;
+            border:1px solid var(--line);border-radius:5px;padding:4px 6px;font-size:12.5px;">
+        <option value="-y,-z,x">当前 YAML（世界x←雷达-y  世界y←雷达-z  世界z←雷达x）</option>
+        <option value="y,z,x">雷达 z → 世界 +Y（左）</option>
+        <option value="z,-x,-y">雷达 z → 世界 +X</option>
+        <option value="-z,y,x">雷达 z → 世界 −X（后）</option>
+      </select></p>
+      <p style="color:#8b93a7;font-size:12px;">约定：<code>to_world.x</code> 的<b>键是世界轴</b>、值是<b>雷达轴</b>
+        —— 读作「<b>世界的 x 轴取自雷达的哪个轴</b>」✗ 不是反过来 ✗</p>
+      <p>棱镜相位 <code>angle_deg</code>：<br>
+        <input type="number" id="inAng" step="5" style="width:78px">
+        <input type="range" id="rgAng" min="-180" max="180" step="5"
+               style="width:100%;vertical-align:middle;margin-top:4px"></p>
+
+      <h2>方向对应</h2>
+      <table>
+        <tr><th>雷达系</th><th>→ 世界系</th><th>说明</th></tr>
+        <tbody id="tblMap"></tbody>
+      </table>
+
+      <h2>数值改变时点云往哪动</h2>
+      <table>
+        <tr><th>改动</th><th>点云移动</th><th>物理</th></tr>
+        <tbody id="tblMove"></tbody>
+      </table>
+      <div class="box" id="calc"></div>
+
+      <h2>试试其它数值</h2>
+      <p>改下面两个框（米）或直接改 URL：<code>?y=0.003&amp;z=-0.01</code></p>
+      <p>
+        y_m = <input type="number" id="inY" step="0.001"><br><br>
+        z_m = <input type="number" id="inZ" step="0.001"><br><br>
+        <button id="btnApply">应用</button>
+        <button id="btnReset">复位视图</button>
+      </p>
+
+      <h2>操作</h2>
+      <ul>
+        <li>左键拖拽 = 旋转视角　滚轮 = 缩放</li>
+        <li>右键 / Shift+左键拖拽 = 平移</li>
+        <li>下方勾选可切换显示元素</li>
+      </ul>
+      <div class="legend">
+        <label class="ck"><input type="checkbox" id="ckLidar" checked>雷达三轴</label>
+        <label class="ck"><input type="checkbox" id="ckWorld" checked>世界三轴</label>
+        <label class="ck"><input type="checkbox" id="ckPlane" checked>旋转平面</label>
+        <label class="ck"><input type="checkbox" id="ckScan" checked>扫描面</label>
+        <label class="ck"><input type="checkbox" id="ckBeam" checked>0/90/180/270° 波束</label>
+        <label class="ck"><input type="checkbox" id="ckComp" checked>分量虚线</label>
+        <label class="ck"><input type="checkbox" id="ckWall" checked>墙壁方向</label>
+      </div>
+
+      <h2>说明</h2>
+      <ul>
+        <li>场景按<b>毫米级局部尺度</b>绘制（三轴长 30 mm），否则 3~10 mm 的偏心看不出来。</li>
+        <li>雷达系先绕自身 z 转 <code>90°</code>（棱镜 0° 相位，<code>mount.angle_deg</code>）再进入 to_world；
+            该步只旋转点云、不改变 offset 的方向基准。</li>
+        <li>世界 Z（转轴）方向上的安装偏差不在此配置内，也不影响点云形变（只整体上下平移）。</li>
+      </ul>
+    </aside>
+  </div>
+</div>
+<script>
+"use strict";
+
+/* =========================================================================
+   配置区 —— 镜像 config/install_side_mount.yaml
+   -------------------------------------------------------------------------
+   toWorld        : 键 = 世界轴, 值 = 雷达轴（与 install_config.py 的
+                    to_world_matrix() 同义）；例 x:"-y" 读作“世界 x = 雷达 −y”
+   mountAxis/Deg  : 棱镜 0° 相位，绕雷达自身该轴旋转点云（LakiBeam 出厂 = 90°）
+   ========================================================================= */
+const CFG = {
+  mountAxis: "z", mountAngleDeg: 90,
+  toWorld: { x: "-y", y: "-z", z: "x" },
+  turntableAxis: "z"
+};
+const AX = { x:[1,0,0], y:[0,1,0], z:[0,0,1] };
+const MM = 0.001;
+const AXIS_LEN = 0.030;
+
+const qs = new URLSearchParams(location.search);
+let OFF = {
+  y: qs.has("y") ? parseFloat(qs.get("y")) : -0.003,
+  z: qs.has("z") ? parseFloat(qs.get("z")) : -0.01
+};
+["x", "y", "z"].forEach(k => { if (qs.has(k)) CFG.toWorld[k] = qs.get(k); });
+if (qs.has("a")) CFG.mountAngleDeg = parseFloat(qs.get("a"));
+
+/* ---------- 数学工具：与 install_config.py 一一对应 ---------- */
+
+// 轴名 → 单位向量： "z"→[0,0,1]，"-x"→[-1,0,0]
+function axisVec(spec){
+  const s = spec.trim();
+  const sign = s.startsWith("-") ? -1 : 1;
+  const name = s.replace("-", "");
+  return AX[name].map(v => v * sign);
+}
+// 等价 numpy.column_stack([vec(world_x), vec(world_y), vec(world_z)])
+// 第 j 列 = 世界第 j 个轴在雷达系里的坐标
+function toWorldMatrix(tw){
+  const c = [axisVec(tw.x), axisVec(tw.y), axisVec(tw.z)];
+  return [[c[0][0], c[1][0], c[2][0]],
+          [c[0][1], c[1][1], c[2][1]],
+          [c[0][2], c[1][2], c[2][2]]];
+}
+// 行向量右乘：等价于 Python 里的  p @ M
+function mulRow(p, M){
+  return [0,1,2].map(j => p[0]*M[0][j] + p[1]*M[1][j] + p[2]*M[2][j]);
+}
+// 绕雷达自身 x/y/z 转 deg 度（棱镜相位 mount_transform 用的就是这个）
+function rotMat(axis, deg){
+  const t = deg*Math.PI/180, c = Math.cos(t), s = Math.sin(t);
+  if (axis === "x") return [[1,0,0],[0,c,-s],[0,s,c]];
+  if (axis === "y") return [[c,0,s],[0,1,0],[-s,0,c]];
+  return [[c,-s,0],[s,c,0],[0,0,1]];
+}
+function mulMV(A, v){
+  return [0,1,2].map(i => A[i][0]*v[0] + A[i][1]*v[1] + A[i][2]*v[2]);
+}
+let M = toWorldMatrix(CFG.toWorld);   // 安装姿态矩阵：雷达系 → 世界系
+
+/* ---------- 偏心 offset ----------
+   代码里 offset 加在“棱镜相位之后、to_world 之前”，且不随相位旋转，
+   所以它的 y_m / z_m 两个分量方向 = 雷达系原始的 y / z 轴。 */
+// 光了心(雷达原点)在世界系中的位置 = to_world(0, y_m, z_m) = 点云整体位移
+function lidarOriginWorld(){
+  return mulRow([0, OFF.y, OFF.z], M);
+}
+// 雷达系的某个方向向量 → 世界系方向
+function lidarAxisWorld(v){
+  return mulRow(v, M);
+}
+function offWorld(){
+  return mulRow([0, OFF.y, OFF.z], M);
+}
+
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+let W = 0, H = 0, DPR = 1;
+
+const view = { yaw: -125*Math.PI/180, pitch: 26*Math.PI/180,
+               dist: 0.30, tx: 0, ty: 0, tz: 0 };
+const HOME = { yaw: -125*Math.PI/180, pitch: 26*Math.PI/180, dist: 0.30 };
+
+function resize(){
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  const r = cv.getBoundingClientRect();
+  W = Math.max(320, r.width); H = Math.max(240, r.height);
+  cv.width = Math.round(W*DPR); cv.height = Math.round(H*DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  draw();
+}
+
+// 轨道相机：以 (yaw,pitch) 球坐标 + 距离 dist 绕 target 观察
+function camera(){
+  const cp = Math.cos(view.pitch), sp = Math.sin(view.pitch);
+  const target = [view.tx, view.ty, view.tz];
+  const eye = [target[0] + view.dist*cp*Math.cos(view.yaw),
+               target[1] + view.dist*cp*Math.sin(view.yaw),
+               target[2] + view.dist*sp];
+  const fwd = norm(sub(target, eye));
+  const right = norm(cross(fwd, [0,0,1]));
+  const up = cross(right, fwd);
+  return { eye, fwd, right, up, focal: 1.55*Math.min(W, H) };
+}
+function sub(a,b){ return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]; }
+function dot(a,b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+function cross(a,b){ return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+function norm(a){ const n=Math.hypot(a[0],a[1],a[2])||1; return [a[0]/n,a[1]/n,a[2]/n]; }
+
+let CAM = null;
+// 三维点 → 屏幕坐标（透视投影；落在相机背后时返回 null）
+function project(p){
+  const v = sub(p, CAM.eye);
+  const zc = dot(v, CAM.fwd);
+  if (zc < 1e-4) return null;
+  const xc = dot(v, CAM.right), yc = dot(v, CAM.up);
+  return [W/2 + CAM.focal*xc/zc, H/2 - CAM.focal*yc/zc, zc];
+}
+
+function line3(a, b, color, width, dash){
+  const A = project(a), B = project(b);
+  if (!A || !B) return;
+  ctx.save();
+  ctx.strokeStyle = color; ctx.lineWidth = width || 1.6; ctx.lineCap = "round";
+  if (dash) ctx.setLineDash(dash);
+  ctx.beginPath(); ctx.moveTo(A[0], A[1]); ctx.lineTo(B[0], B[1]); ctx.stroke();
+  ctx.restore();
+}
+function arrow3(from, to, color, width, label){
+  const A = project(from), B = project(to);
+  if (!A || !B) return;
+  const dx = B[0]-A[0], dy = B[1]-A[1], len = Math.hypot(dx,dy);
+  if (len < 1) return;
+  const ux = dx/len, uy = dy/len;
+  const head = Math.min(13, Math.max(7, len*0.22));
+  ctx.save();
+  ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = width || 2.2; ctx.lineCap="round";
+  ctx.beginPath(); ctx.moveTo(A[0],A[1]); ctx.lineTo(B[0]-ux*head*0.8, B[1]-uy*head*0.8); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(B[0], B[1]);
+  ctx.lineTo(B[0]-ux*head - uy*head*0.45, B[1]-uy*head + ux*head*0.45);
+  ctx.lineTo(B[0]-ux*head + uy*head*0.45, B[1]-uy*head - ux*head*0.45);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+  if (label) text2(B[0]+9*ux+6, B[1]+9*uy-6, label, color, "600");
+}
+function text2(x, y, s, color, weight, size){
+  ctx.save();
+  ctx.fillStyle = color || "#c3cad9";
+  ctx.font = (weight||"500")+" "+(size||12)+"px ui-monospace,Consolas,monospace";
+  ctx.textBaseline = "middle";
+  ctx.fillText(s, x, y);
+  ctx.restore();
+}
+function dot3(p, color, r){
+  const P = project(p); if (!P) return;
+  ctx.save(); ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(P[0], P[1], r||3.2, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+function disc3(center, radius, normal, fill, stroke){
+  const n = norm(normal);
+  let e1 = norm(cross(n, Math.abs(n[2]) > 0.9 ? [1,0,0] : [0,0,1]));
+  const e2 = cross(n, e1);
+  const pts = [];
+  for (let i=0;i<=72;i++){
+    const t = i/72*Math.PI*2;
+    pts.push([center[0]+radius*(Math.cos(t)*e1[0]+Math.sin(t)*e2[0]),
+              center[1]+radius*(Math.cos(t)*e1[1]+Math.sin(t)*e2[1]),
+              center[2]+radius*(Math.cos(t)*e1[2]+Math.sin(t)*e2[2])]);
+  }
+  const proj = pts.map(project);
+  if (proj.some(p=>!p)) return;
+  ctx.save();
+  ctx.beginPath(); ctx.moveTo(proj[0][0], proj[0][1]);
+  proj.slice(1).forEach(p=>ctx.lineTo(p[0],p[1]));
+  ctx.closePath();
+  ctx.fillStyle = fill; ctx.fill();
+  if (stroke){ ctx.strokeStyle = stroke; ctx.lineWidth = 1.2; ctx.stroke(); }
+  ctx.restore();
+}
+
+function triad(origin, axes, labels, colors, width, dash){
+  axes.forEach((v,i)=>{
+    const a = [origin[0]+v[0]*AXIS_LEN, origin[1]+v[1]*AXIS_LEN, origin[2]+v[2]*AXIS_LEN];
+    line3(origin, a, colors[i], width, dash);
+    const P = project(a);
+    if (P) text2(P[0]+7, P[1]-7, labels[i], colors[i], "650", 12.5);
+  });
+}
+
+function drawScene(){
+  // 全部用“米”为单位。三轴长度 = AXIS_LEN = 30 mm —— 局部尺度，
+  // 否则几毫米的偏心在整场景尺度下根本看不见。
+  const off = offWorld();
+  const lid = lidarOriginWorld();
+  const worldAxes   = [[1,0,0],[0,1,0],[0,0,1]];
+  const worldLabels = ["世界 X","世界 Y","世界 Z"];
+  const worldColors = ["#ff7b72","#7bd88f","#79c0ff"];
+
+  // 转盘旋转平面 = 世界 X-Y 平面(Z=0)。偏心一定落在它里面
+  if (document.getElementById("ckPlane").checked){
+    disc3([0,0,0], 0.052, [0,0,1], "rgba(121,192,255,0.10)", "rgba(121,192,255,0.35)");
+    text2(...(()=>{const P=project([0.052,0,0]); return P?[P[0]+6,P[1]-8]:[0,0];})(),
+          "转盘旋转平面 (Z=0)", "rgba(121,192,255,0.75)", "500", 11.5);
+  }
+
+  // 转盘旋转轴 = 世界 Z（竖直）
+  line3([0,0,-0.075],[0,0,0.075], "rgba(121,192,255,0.55)", 1.4, [5,5]);
+  const PA = project([0,0,0.078]);
+  if (PA) text2(PA[0]+6, PA[1]-6, "转盘旋转轴", "#79c0ff", "600", 12);
+
+  if (document.getElementById("ckWorld").checked){
+    triad([0,0,0], worldAxes, worldLabels, worldColors, 2.6);
+  }
+
+  if (document.getElementById("ckWall").checked){
+    const fwd = lidarAxisWorld([0,0,1]);
+    arrow3([lid[0]+fwd[0]*0.05, lid[1]+fwd[1]*0.05, lid[2]+fwd[2]*0.05],
+           [lid[0]+fwd[0]*0.13, lid[1]+fwd[1]*0.13, lid[2]+fwd[2]*0.13],
+           "rgba(255,123,114,0.5)", 1.6, "→ 墙（雷达 z 方向 ≈1.2 m）");
+  }
+
+  // offset 的两个分量：沿雷达 y / z，各自投影到世界系后画成虚线
+  if (document.getElementById("ckComp").checked){
+    const k = [off[0], 0, 0];
+    const j = [off[0], off[1], 0];
+    line3([0,0,0], k, "rgba(255,209,102,0.55)", 1.4, [4,4]);
+    line3(k, j, "rgba(255,209,102,0.55)", 1.4, [4,4]);
+    const L = project(j);
+    if (L) text2(L[0]+8, L[1]+14,
+        "y_m=" + (OFF.y*1000).toFixed(1) + "mm (沿世界 −Y)", "rgba(255,209,102,0.85)", "600", 11.5);
+    const K = project(k);
+    if (K) text2(K[0]+8, K[1]+14,
+        "z_m=" + (OFF.z*1000).toFixed(1) + "mm (世界 X)", "rgba(255,209,102,0.85)", "600", 11.5);
+  }
+
+  arrow3([0,0,0], off, "#ffd166", 2.8, null);
+  dot3(off, "#ffd166", 3.6);
+  const OP = project(off);
+  if (OP) text2(OP[0]+10, OP[1]-12, "offset", "#ffd166", "700", 12.5);
+
+  // 雷达扫描面：以雷达 z（镜头轴）为法向的平面 —— 2D 雷达就在这个面里扫
+  if (document.getElementById("ckScan").checked){
+    const nrm = lidarAxisWorld([0,0,1]);
+    disc3(lid, 0.030, nrm, "rgba(160,255,210,0.07)", "rgba(160,255,210,0.32)");
+    text2(...(()=>{const P=project([lid[0]+nrm[0]*0.030, lid[1]+nrm[1]*0.030, lid[2]+nrm[2]*0.030]);
+                 return P?[P[0]+6,P[1]-8]:[0,0];})(),
+          "雷达扫描面", "rgba(160,255,210,0.8)", "500", 11.5);
+  }
+
+  // 0/90/180/270° 四条波束：看棱镜相位把“报告角度”转到了哪个物理方向
+  if (document.getElementById("ckBeam").checked){
+    const Rm = rotMat(CFG.mountAxis, CFG.mountAngleDeg);
+    [0, 90, 180, 270].forEach(a => {
+      const v = mulMV(Rm, [Math.cos(a*Math.PI/180), Math.sin(a*Math.PI/180), 0]);
+      const dir = mulRow(v, M);
+      const end = [lid[0]+dir[0]*0.028, lid[1]+dir[1]*0.028, lid[2]+dir[2]*0.028];
+      line3(lid, end, "rgba(160,255,210,0.8)", 1.6);
+      const P = project(end);
+      if (P) text2(P[0]+5, P[1]-6, a + "°", "rgba(160,255,210,0.95)", "600", 11);
+    });
+  }
+
+  // 雷达三轴（画在光心处）—— 这张图的主角：安装姿态
+  if (document.getElementById("ckLidar").checked){
+    const lo = lid;
+    dot3(lo, "#ffb454", 4);
+    const lx = lidarAxisWorld([1,0,0]);
+    const ly = lidarAxisWorld([0,1,0]);
+    const lz = lidarAxisWorld([0,0,1]);
+    const LP = project(lo);
+    if (LP) text2(LP[0]+9, LP[1]+15, "雷达光心", "#ffb454", "700", 12.5);
+    triad(lo, [lx,ly,lz], ["雷达 x (0°波束)","雷达 y (90°波束)","雷达 z (扫描面法向)"],
+          ["#ffb454","#ff9f43","#ffd7a1"], 2.0, [7,4]);
+  }
+}
+
+function draw(){
+  CAM = camera();
+  ctx.clearRect(0,0,W,H);
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,"#0e1015"); g.addColorStop(1,"#0a0c11");
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+  drawScene();
+  text2(14, H-34, "尺度：三轴长 30 mm（局部毫米级视图）", "#6b7488", "500", 12);
+  text2(14, H-16, "左键拖拽旋转 · 滚轮缩放 · 右键/Shift+左键平移", "#6b7488", "500", 12);
+}
+
+function dirName(v){
+  const nm = ["X","Y","Z"], out = [];
+  v.forEach((c,i)=>{ if (Math.abs(c) > 1e-9) out.push((c>0?"+":"−") + nm[i]); });
+  return out.join("") || "0";
+}
+function physName(v){
+  return Math.abs(v[2]) > 0.99
+    ? "竖直（沿转轴；偏心在这个方向只让点云上下平移）"
+    : "水平（旋转平面内）";
+}
+function rowHtml(cells){
+  return "<tr>" + cells.map(c => "<td>" + c + "</td>").join("") + "</tr>";
+}
+function updateSide(){
+  const off = offWorld();
+  const lx = mulRow([1,0,0], M), ly = mulRow([0,1,0], M), lz = mulRow([0,0,1], M);
+  const tw = CFG.toWorld;
+  document.getElementById("tag").textContent =
+    "y_m=" + OFF.y.toFixed(4) + "  z_m=" + OFF.z.toFixed(4) +
+    "  |  mount " + CFG.mountAxis + " " + CFG.mountAngleDeg + "°  |  " +
+    "世界x←雷达" + tw.x + "   世界y←雷达" + tw.y + "   世界z←雷达" + tw.z;
+  document.getElementById("tblMap").innerHTML =
+    rowHtml(["雷达 <b>x</b>", "世界 <b>" + dirName(lx) + "</b>",
+             physName(lx) + (Math.abs(lx[2]) > 0.99 ? "（转轴方向，配置里没有这一项）" : "")]) +
+    rowHtml(["雷达 <b>y</b>", "世界 <b>" + dirName(ly) + "</b>", physName(ly)]) +
+    rowHtml(["雷达 <b>z</b>", "世界 <b>" + dirName(lz) + "</b>", physName(lz)]);
+  document.getElementById("tblMove").innerHTML =
+    rowHtml(["<code>y_m</code> +δ", "世界 " + dirName(ly) + " 方向 δ", physName(ly)]) +
+    rowHtml(["<code>z_m</code> +δ", "世界 " + dirName(lz) + " 方向 δ", physName(lz)]);
+  document.getElementById("calc").textContent =
+    "光心(世界系) = to_world(0, y_m, z_m) = (" + (off[0]*1000).toFixed(1) + ", " +
+    (off[1]*1000).toFixed(1) + ", " + (off[2]*1000).toFixed(1) + ") mm\n" +
+    "点云整体位移 = 同一个向量";
+  document.getElementById("inY").value = OFF.y;
+  document.getElementById("inZ").value = OFF.z;
+  document.getElementById("inAng").value = CFG.mountAngleDeg;
+  document.getElementById("rgAng").value = CFG.mountAngleDeg;
+}
+
+// ---------- 交互：拖拽旋转 / 滚轮缩放 / 右键或 Shift+左键平移 ----------
+let drag = null;
+cv.addEventListener("pointerdown", e=>{
+  cv.setPointerCapture(e.pointerId);
+  drag = { x:e.clientX, y:e.clientY, pan: (e.button===2 || e.shiftKey) };
+  cv.classList.add("drag");
+});
+cv.addEventListener("pointermove", e=>{
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  drag.x = e.clientX; drag.y = e.clientY;
+  if (drag.pan){
+    const scale = view.dist * 0.0022;
+    const right = CAM.right, up = CAM.up;
+    view.tx -= (dx*right[0] + -dy*up[0]) * scale;
+    view.ty -= (dx*right[1] + -dy*up[1]) * scale;
+    view.tz -= (dx*right[2] + -dy*up[2]) * scale;
+  } else {
+    view.yaw += dx*0.008;
+    view.pitch = Math.max(-1.45, Math.min(1.45, view.pitch + dy*0.008));
+  }
+  draw();
+});
+function endDrag(){ drag = null; cv.classList.remove("drag"); }
+cv.addEventListener("pointerup", endDrag);
+cv.addEventListener("pointercancel", endDrag);
+cv.addEventListener("contextmenu", e=>e.preventDefault());
+cv.addEventListener("wheel", e=>{
+  e.preventDefault();
+  view.dist = Math.max(0.06, Math.min(1.2, view.dist * (e.deltaY>0 ? 1.1 : 0.9)));
+  draw();
+}, {passive:false});
+
+["ckLidar","ckWorld","ckPlane","ckScan","ckBeam","ckComp","ckWall"].forEach(id=>{
+  document.getElementById(id).addEventListener("change", draw);
+});
+// 棱镜相位输入（数字框 + 滑块联动）：拖动可看四条波束在扫描面内一起转
+const inAng = document.getElementById("inAng"), rgAng = document.getElementById("rgAng");
+function setAng(v, from){
+  const n = Math.max(-180, Math.min(180, parseFloat(v)));
+  if (!Number.isFinite(n)) return;
+  CFG.mountAngleDeg = n;
+  if (from !== "num") inAng.value = n;
+  if (from !== "rg")  rgAng.value = n;
+  updateSide(); draw();
+}
+inAng.addEventListener("input", ()=>setAng(inAng.value, "num"));
+rgAng.addEventListener("input", ()=>setAng(rgAng.value, "rg"));
+document.getElementById("btnApply").addEventListener("click", ()=>{
+  const y = parseFloat(document.getElementById("inY").value);
+  const z = parseFloat(document.getElementById("inZ").value);
+  if (Number.isFinite(y)) OFF.y = y;
+  if (Number.isFinite(z)) OFF.z = z;
+  updateSide(); draw();
+});
+document.getElementById("btnReset").addEventListener("click", ()=>{
+  view.yaw = HOME.yaw; view.pitch = HOME.pitch; view.dist = HOME.dist;
+  view.tx = view.ty = view.tz = 0;
+  draw();
+});
+const selMount = document.getElementById("selMount");
+selMount.value = ["x","y","z"].map(k => CFG.toWorld[k]).join(",");
+selMount.addEventListener("change", ()=>{
+  const v = selMount.value.split(",");
+  CFG.toWorld = { x: v[0], y: v[1], z: v[2] };
+  M = toWorldMatrix(CFG.toWorld);
+  updateSide(); draw();
+});
+window.addEventListener("resize", resize);
+
+updateSide();
+resize();
+</script>
+</body>
+</html>
