@@ -978,6 +978,16 @@ class TurntableGuiController(Node):
             self.log(f"Colored point cloud saved: {out} ({colored}/{total} points)")
         except Exception as exc:
             self.log(f"Colorize failed: {exc}")
+        try:
+            from dense_colorize_pointcloud import dense_colorize
+            dense_out, n, cov = dense_colorize(
+                out_dir, extrinsics, camera_info, photo_angle_deg,
+                min_dist=self._min_dist,
+                max_dist=self._max_dist if self._max_dist is not None else 3.0,
+                save_index_map=True)
+            self.log(f"Dense RGBD cloud saved: {dense_out} ({n} points, coverage {cov:.1%})")
+        except Exception as exc:
+            self.log(f"Dense colorize failed: {exc}")
 
     def _pointcloud2_to_numpy(self, msg: PointCloud2) -> np.ndarray | None:
         try:
