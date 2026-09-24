@@ -78,14 +78,19 @@ Outputs: `cropped_3m_20deg_board.ply`, `view_board.png`.
    `solvePnP(SOLVEPNP_IPPE)` + `solvePnPRefineLM` → camera plane `(n_c, d_c)` with **robust corner
    rejection** (`solve_pnp_robust`): corners with reprojection error > 2.5 px are dropped and PnP re-solved
    (one bad corner can bias the whole pose by ~0.5°/9 mm — measured); a frame with > 2 bad corners is
-   rejected entirely;
+   rejected entirely. Detection ladder (`find_board_corners`): SB exact → classic adaptive → threshold/Lab
+   variants → CLAHE/gamma/**2x upscale** → **div-norm (照度压平)** → **子晶格种子引导** (central 4×6/6×4
+   sub-lattice → homography extrapolation of all 48 corners + cornerSubPix + 1.5px lattice-residual gate),
+   recovering washed-out/tilted frames that defeat the direct detectors (20260923: 070700/070957/071232
+   recovered; 083911 detected but still rejected for bad corner quality — regression pinned by
+   `test_find_board_corners.py`);
 2. **lidar side** → `segment_board.py extract_rect_plane`: remove ground (RANSAC horizontal) →
    deterministic multi-seed RANSAC candidates (±2 cm, `DIST_THR`) → per-candidate SVD refine →
    2D sliding of the known 0.84×0.60 m window on the plane (score = in-window − 3×ring, ring = 3 cm
    band outside the window) → largest connected component of the plane band (the ±2 cm slab is
    infinitely extended and would otherwise swallow floor/ceiling/scatter) → final mask on the original
    cloud → quality gate (frame skipped if: fitted size < 0.78/0.54 m, size error > 16 %, or
-   selected/band ratio < 0.75). All thresholds are named constants at the top of `segment_board.py`;
+   selected/band ratio < 0.9). All thresholds are named constants at the top of `segment_board.py`;
 3. over all poses solve `n_c = R·n_l` (Kabsch/SVD) and `t` from board-center differences, then
    image-space translation refinement (R fixed; t.x/t.y only).
 

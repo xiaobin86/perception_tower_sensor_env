@@ -275,71 +275,54 @@ def guided_board_plane(points: np.ndarray, camera_plane: Plane, init: tuple[np.n
     return fit_plane_svd(band), band
 
 
-def extract_lidar_board(points: np.ndarray, rng: np.random.Generator, out_dir: str,
-                        camera_plane: Plane | None = None, quad: np.ndarray | None = None,
-                        K: np.ndarray | None = None,
-                        dist: np.ndarray | None = None,
-                        init: tuple[np.ndarray, np.ndarray] | None = None,
-                        photo_angle: float = 90.0,
-                        use_guided: bool = False) -> tuple[Plane, np.ndarray]:
-    try:
-        from segment_board import extract_rect_plane
-        res = extract_rect_plane(points)
-    except Exception as exc:
-        print(f"    [board] segment_board 不可用({exc})，回退旧路径")
-        res = (None, None)
-    if res[0] is not None:
-        mask, info = res
-        pts = points[mask]
-        if len(pts) >= MIN_BOARD_INLIERS:
-            c0 = pts.mean(axis=0)
-            _, _, vt = np.linalg.svd(pts - c0, full_matrices=False)
-            uv = np.stack([(pts - c0) @ vt[0], (pts - c0) @ vt[1]], axis=1).astype(np.float32)
-            _, (rw, rh), _ = cv2.minAreaRect(uv)
-            lo, sh = max(rw, rh), min(rw, rh)
-            band_n = max(int(info.get("band_cc_n", 1)), 1)
-            ratio = len(pts) / band_n
-            se = abs(lo - BOARD_LONG_M) / BOARD_LONG_M + abs(sh - BOARD_SHORT_M) / BOARD_SHORT_M
-            # 质量门: 裁剪应接近满尺寸 0.799x0.599(下限+误差上限) 且最大联通区域
-            # 占比足够(混墙/分割错 -> 占比低; 条带/缩窗 -> 尺寸不对)
-            if lo < 0.74 or sh < 0.54 or se > 0.16 or ratio < 0.85:
-                print(f"    [board] segment_board 质量门未过: size {lo*100:.0f}x{sh*100:.0f}cm "
-                      f"err {se*100:.0f}% ratio {ratio:.2f}，回退旧路径")
-            else:
-                print(f"    [board] segment_board ✓ 实测 {lo*100:.1f}×{sh*100:.1f} cm"
-                      f"(期望 80×60) 占比 {ratio:.2f} → {len(pts)} 点")
-                write_ply_xyz(os.path.join(out_dir, "dbg_3_plane.ply"), pts)
-                return Plane(normal=info["n"], offset=info["d"]), pts
-        print(f"    [board] segment_board 只取到 {len(pts)} 点，回退旧路径")
-    else:
-        print("    [board] segment_board 未找到，回退旧路径")
+def extract_lidar_board(points: np.ndarray, out_dir: str) -> tuple[Plane, np.ndarray]:
+    """v2 (CC+矩形度选候选, segment_board_v2) 为唯一路径; 未找到/未过质量门 -> 抛异常跳帧。
 
-    ground = find_ground_plane(points, rng)
-    radius = np.linalg.norm(points, axis=1)
-    scene = points[(np.abs(points @ ground.normal - ground.offset) > GROUND_SLAB_M)
-                   & (radius > SELF_RETURN_RADIUS_M)]
-    write_ply_xyz(os.path.join(out_dir, "dbg_2_no_ground.ply"), scene)
-    guided = None
-    if use_guided and camera_plane is not None and init is not None:
-        guided = guided_board_plane(scene, camera_plane, init, photo_angle)
-    if guided is not None:
-        plane, inliers = guided
-        if quad is not None:
-            inliers = clip_to_board_quad(inliers, quad, K, dist, init, photo_angle)
-        window = board_window_mask(inliers, plane.normal)
-        if window is not None and int(window.sum()) >= 200:
-            inliers = inliers[window]
-    else:
-        plane, inliers = search_board_plane(scene, rng)
-    rough = fit_plane_svd(inliers)
-    comp = largest_component_mask(inliers, rough.normal)
-    if comp is not None and int(comp.sum()) >= 200:
-        inliers = inliers[comp]
-        plane = fit_plane_svd(inliers)
-    write_ply_xyz(os.path.join(out_dir, "dbg_3_plane.ply"), inliers)
-    if len(inliers) < MIN_BOARD_INLIERS:
-        raise ValueError(f"board patch too sparse ({len(inliers)} points < {MIN_BOARD_INLIERS})")
-    return plane, inliers
+    快路径: pose_dir 已有 board_rect_v2.ply (找板结果已落地) 时直接复用, 跳过 v2 找板;
+    该 PLY 由 segment_board_v2 --save 写出, 已过质量门, 此处只做平面拟合。
+    """
+    pre = os.path.join(out_dir, "board_rect_v2.ply")
+    if os.path.exists(pre):
+        try:
+            pts = read_ply_xyz(pre)
+        except Exception:
+            pts = np.empty((0, 3))
+        if len(pts) >= MIN_BOARD_INLIERS:
+            plane = fit_plane_svd(pts)
+            print(f"    [board] 复用预存板点 board_rect_v2.ply: {len(pts)} 点, 跳过 v2 找板")
+            return plane, pts
+        print(f"    [board] 预存板点不足 ({len(pts)} < {MIN_BOARD_INLIERS}), 重新跑 v2 找板")
+    try:
+        from segment_board_v2 import extract_rect_plane_v2
+        res = extract_rect_plane_v2(points, verbose=False)[:2]
+    except Exception as exc:
+        raise ValueError(f"segment_board_v2 不可用({exc})") from exc
+
+    if res[0] is None:
+        raise ValueError("segment_board v2 未找到板")
+    mask, info = res
+    pts = points[mask]
+    if len(pts) >= MIN_BOARD_INLIERS:
+        c0 = pts.mean(axis=0)
+        _, _, vt = np.linalg.svd(pts - c0, full_matrices=False)
+        uv = np.stack([(pts - c0) @ vt[0], (pts - c0) @ vt[1]], axis=1).astype(np.float32)
+        _, (rw, rh), _ = cv2.minAreaRect(uv)
+        lo, sh = max(rw, rh), min(rw, rh)
+        band_n = max(int(info.get("band_cc_n", 1)), 1)
+        ratio = len(pts) / band_n
+        se = abs(lo - BOARD_LONG_M) / BOARD_LONG_M + abs(sh - BOARD_SHORT_M) / BOARD_SHORT_M
+        # 质量门: 裁剪应接近满尺寸 0.799x0.599(下限+误差上限) 且最大联通区域
+        # 占比足够(混墙/分割错 -> 占比低; 条带/缩窗 -> 尺寸不对)
+        if lo < 0.74 or sh < 0.54 or se > 0.16 or ratio < 0.9:
+            raise ValueError(f"segment_board v2 质量门未过: "
+                             f"size {lo*100:.0f}x{sh*100:.0f}cm "
+                             f"err {se*100:.0f}% ratio {ratio:.2f}")
+        print(f"    [board] segment_board v2 ✓ 实测 {lo*100:.1f}×{sh*100:.1f} cm"
+              f"(期望 80×60) 占比 {ratio:.2f} → {len(pts)} 点")
+        write_ply_xyz(os.path.join(out_dir, "dbg_3_plane.ply"), pts)
+        return Plane(normal=info["n"], offset=info["d"]), pts
+    raise ValueError(f"segment_board v2 只取到 {len(pts)} 点 "
+                     f"(<{MIN_BOARD_INLIERS})")
 
 
 def _try_detect(gray, pat, flags):
@@ -352,7 +335,66 @@ def _try_detect(gray, pat, flags):
     return None
 
 
+def _seeded_completion(gray: np.ndarray) -> np.ndarray | None:
+    """末级回退: 检测器只能锁中央子晶格时, 用单应外推全 8x6 角点再亚像素精修。
+
+    washed-out/倾斜帧整板 8x6 网格锁不住, 但中央 4x6/6x4 子阵可检; 子阵点与
+    对应物体坐标构成 板平面->图像 的单应, 外推全部 48 角点位置, cornerSubPix
+    精修后重拟合单应, 格点残差 RMS < 1.5px 才接受(防子晶格假阳性)。
+    """
+    flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+    h, w = gray.shape
+    full_obj = board_object_points()
+    best: tuple[float, np.ndarray] | None = None
+    for sw, sh in ((4, 6), (6, 4)):
+        found, sub = cv2.findChessboardCorners(gray, (sw, sh), flags)
+        if not found:
+            continue
+        sub = cv2.cornerSubPix(gray, sub, (5, 5), (-1, -1), criteria).reshape(-1, 2)
+        for xoff in range(BOARD_COLS - sw + 1):
+            for yoff in range(BOARD_ROWS - sh + 1):
+                sub_obj = np.array([[(xoff + i) * SQUARE_SIZE_X,
+                                     (yoff + j) * SQUARE_SIZE_Y, 0.0]
+                                    for j in range(sh) for i in range(sw)],
+                                   dtype=np.float64)
+                H, _ = cv2.findHomography(sub_obj[:, :2], sub, 0)
+                if H is None:
+                    continue
+                ones = np.ones((len(full_obj), 1))
+                proj = (H @ np.hstack([full_obj[:, :2], ones]).T).T
+                proj = proj[:, :2] / proj[:, 2:]
+                if (proj[:, 0] < 0).any() or (proj[:, 0] >= w).any() \
+                        or (proj[:, 1] < 0).any() or (proj[:, 1] >= h).any():
+                    continue
+                refined = cv2.cornerSubPix(
+                    gray, np.ascontiguousarray(proj.reshape(-1, 1, 2), dtype=np.float32),
+                    (5, 5), (-1, -1), criteria).reshape(-1, 2)
+                H2, _ = cv2.findHomography(full_obj[:, :2], refined, 0)
+                if H2 is None:
+                    continue
+                back = (H2 @ np.hstack([full_obj[:, :2], ones]).T).T
+                rms = float(np.sqrt(
+                    ((back[:, :2] / back[:, 2:] - refined) ** 2).sum(axis=1).mean()))
+                if rms < 1.5 and (best is None or rms < best[0]):
+                    best = (rms, refined)
+    return None if best is None else best[1].reshape(-1, 1, 2)
+
+
+def _ordered(pat: tuple[int, int], corners: np.ndarray) -> np.ndarray:
+    """(6,8) 命中时角点是 6点/行 x 8行 顺序, 需转置成 8点/行 与物体点行主序一致。
+    (88.75mm 方向 9 格 = 8 内角点, 85.5mm 方向 7 格 = 6 内角点; 矩形格错配会让
+    PnP 崩溃(实测 RMS 50px), 旧方格板转置无害——所以换矩形板后才暴露此 bug)"""
+    if pat == (BOARD_ROWS, BOARD_COLS):
+        c = np.asarray(corners, dtype=np.float32).reshape(BOARD_COLS, BOARD_ROWS, 2)
+        return c.transpose(1, 0, 2).reshape(-1, 1, 2)
+    return corners
+
+
 def find_board_corners(image: np.ndarray) -> np.ndarray:
+    # OpenCV 棋盘格检测走全局 RNG, 不固定种子则同一帧多次检出可能不同
+    # (实测 ~1/10 概率某个角点跳 ~14px, 标定/标注结果不可复现)
+    cv2.setRNGSeed(0)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     patterns = [(BOARD_COLS, BOARD_ROWS), (BOARD_ROWS, BOARD_COLS)]
     # 先用 OpenCV 现代检测器 SB（自带亚像素，定位明显更准），失败再退回经典检测器
@@ -361,14 +403,14 @@ def find_board_corners(image: np.ndarray) -> np.ndarray:
             ok, corners = cv2.findChessboardCornersSB(
                 gray, pat, flags=cv2.CALIB_CB_EXHAUSTIVE + cv2.CALIB_CB_ACCURACY)
             if ok:
-                return corners
+                return _ordered(pat, corners)
         except cv2.error:
             pass
     flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
     for pat in patterns:
         found, corners = cv2.findChessboardCorners(gray, pat, flags)
         if found:
-            return corners
+            return _ordered(pat, corners)
     # 暖色低对比度印刷会击穿自适应阈值，需要多组窗口大小；Otsu 与 B/G 通道作为补充
     thresh_variants = [
         cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -384,7 +426,7 @@ def find_board_corners(image: np.ndarray) -> np.ndarray:
             try:
                 ok, corners = cv2.findChessboardCornersSB(th, pat)
                 if ok:
-                    return corners
+                    return _ordered(pat, corners)
             except cv2.error:
                 pass
     for ch in channels:
@@ -392,9 +434,38 @@ def find_board_corners(image: np.ndarray) -> np.ndarray:
             try:
                 ok, corners = cv2.findChessboardCornersSB(ch, pat)
                 if ok:
-                    return corners
+                    return _ordered(pat, corners)
             except cv2.error:
                 pass
+    # 低对比度(过曝发白)/倾斜帧回退: CLAHE / gamma / 2x 上采样增强后再检
+    # (增强图检出的角点会再走 cornerSubPix 精修; 2x 图的坐标需除回)
+    clahe_imgs = [cv2.createCLAHE(clipLimit=c, tileGridSize=(8, 8)).apply(gray)
+                  for c in (2.0, 4.0)]
+    gamma_imgs = [cv2.LUT(gray, np.array([((i / 255.0) ** g) * 255
+                                          for i in range(256)], np.uint8))
+                  for g in (0.6, 1.5)]
+    big = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    bg = cv2.GaussianBlur(gray, (0, 0), 25)
+    div = cv2.divide(gray, bg, scale=128)   # 除法归一化: 压平光照, 救 washed-out 帧
+    enhanced = clahe_imgs + gamma_imgs + [div,
+        big, cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(big)]
+    for i, img2 in enumerate(enhanced):
+        for pat in patterns:
+            try:
+                ok, corners = cv2.findChessboardCornersSB(img2, pat)
+                if ok:
+                    return _ordered(pat, corners) * (0.5 if i >= len(enhanced) - 2 else 1.0)
+            except cv2.error:
+                pass
+    for i, img2 in enumerate(enhanced):
+        for pat in patterns:
+            found, corners = cv2.findChessboardCorners(img2, pat, flags)
+            if found:
+                return _ordered(pat, corners) * (0.5 if i >= len(enhanced) - 2 else 1.0)
+    # 末级: 子晶格种子引导(整板锁不住但中央子阵可检的 washed-out/倾斜帧)
+    seeded = _seeded_completion(gray)
+    if seeded is not None:
+        return seeded
     raise ValueError(f"checkerboard ({BOARD_COLS}x{BOARD_ROWS} inner corners) not found")
 
 
@@ -489,10 +560,7 @@ def process_pose(pose_dir: str, K: np.ndarray, dist: np.ndarray,
         raise ValueError(f"{pose_dir}: color.png not readable")
     points = read_ply_xyz(os.path.join(pose_dir, "merged.ply"))
     camera_plane, image_points, up_cam, center_cam, board_polygon = detect_camera_plane(image, K, dist)
-    lidar_plane, inliers = extract_lidar_board(points, rng, pose_dir, camera_plane=camera_plane,
-                                               quad=board_polygon, K=K,
-                                               dist=dist, init=init, photo_angle=photo_angle_deg,
-                                               use_guided=use_guided)
+    lidar_plane, inliers = extract_lidar_board(points, pose_dir)
     if photo_angle_deg:
         Rz = rotation_z(photo_angle_deg)
         lidar_plane = Plane(Rz @ lidar_plane.normal, lidar_plane.offset)

@@ -58,7 +58,7 @@ MIN_SEL = 300                     # 最终选中点下限(原始点云系), 低�
 # 带内最大连通域(滑窗后的"原平面"口径)
 BAND_CELL = 0.02                  # 连通域栅格边长 2cm
 # 质量门(与 calibrate_camera_lidar.py 顶部的门同步修改):
-#   裁剪长边 >= 0.74m, 短边 >= 0.54m, 尺寸误差 <= 16%, 原占比 >= 0.85, 否则整帧剔除
+#   裁剪长边 >= 0.74m, 短边 >= 0.54m, 尺寸误差 <= 16%, 原占比 >= 0.9, 否则整帧剔除
 
 
 def _ransac_planes(P: np.ndarray, dist_thr: float = DIST_THR, K: int = RANSAC_K,
@@ -244,13 +244,15 @@ def extract_rect_plane(P: np.ndarray, L: float = BOARD_L, W: float = BOARD_W,
     best = max(valid, key=lambda c: c["score"])
 
     # 3.5 回原始点云(去地面后): 平面距离 + 旋转已知尺寸窗 SDF + 带内最大连通域
-    th = np.radians(-best["ang"])
+    # 注意: wc/hc 是滑窗"旋转后坐标系"里的窗中心, 必须先旋转再减中心;
+    # 反过来(先减后转)只在窗中心≈(u,v)原点(板质心)或角度≈0 时碰巧正确 (085036 踩雷:
+    # 板离质心 1m, 先减后转错位 1m -> mask=0 整帧 FAIL)
+    th = np.radians(best["ang"])
     ca, sa = np.cos(th), np.sin(th)
     u = (Pg - best["c"]) @ best["e1"]
     v = (Pg - best["c"]) @ best["e2"]
-    du, dv = u - best["wc"], v - best["hc"]
-    uu = du * ca - dv * sa
-    vv = du * sa + dv * ca
+    uu = u * ca + v * sa - best["wc"]
+    vv = -u * sa + v * ca - best["hc"]
     band_g = np.abs(Pg @ best["n"] - best["d"]) < dist_thr
     cc_g = _band_cc(Pg, best, band_g)
     mask_g = band_g & cc_g \
@@ -317,7 +319,7 @@ def main() -> int:
         band_n = int(info.get("band_cc_n", 0))
         ratio_P = info["n_sel"] / max(band_n, 1)
         warn = ""
-        if ratio_P < 0.85:
+        if ratio_P < 0.9:
             warn += " [占比低?]"
         if se > 0.16:
             warn += " [缩窗?]"
