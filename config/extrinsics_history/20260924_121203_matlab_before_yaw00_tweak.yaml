@@ -1,0 +1,36 @@
+lidar_to_camera:
+  rotation_matrix:
+  - -0.032
+  - -0.9993
+  - 0.0209
+  - -0.5708
+  - 0.0012
+  - -0.8211
+  - 0.8205
+  - -0.0382
+  - -0.5704
+  translation:
+  - 0.0263
+  - 0.059
+  - -0.0198
+matlab_source:
+  comment: 'MATLAB lidarCameraTform (2026-09-24 用户解算, 4位有效数字), 原始值为角度0参考系;
+    此处已换算为照片位姿约定 R_p = R_matlab·Rz(-90°), t 不变, 下游 colorize/dense 用默认
+    photo_angle=90 即等价于原始 MATLAB 变换。'
+  rotation_matrix:
+  - -0.9993
+  - 0.032
+  - 0.0209
+  - 0.0012
+  - 0.5708
+  - -0.8211
+  - -0.0382
+  - -0.8205
+  - -0.5704
+  translation:
+  - 0.0263
+  - 0.059
+  - -0.0198
+note: p_camera = R @ p_lidar + t (merged-frame LiDAR at photo pose; 本版来自 MATLAB 标定换算
+  (源内参 MATLAB 拟合值 fx 610.75/fy 625.63/cx 652.81/cy 373.98, 渲染仍用 config/camera_info.yaml);
+  版本历史与选版逻辑见 AGENTS.md)

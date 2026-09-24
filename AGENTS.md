@@ -95,14 +95,19 @@ rectified; pre-zeroing coefficients are in `config/camera_info.yaml.bak_withdist
 passes `d` through `cv2.projectPoints`, so restoring them needs no code change); board is 8×6 inner
 corners, rectangular 88.75×85.5 mm squares (SQUARE_SIZE_X/Y in `calibrate_camera_lidar.py`).
 
-**Official extrinsics (current — 2026-09-24, MATLAB 标定版, 用户指定)** =
+**Official extrinsics (current — 2026-09-24, MATLAB 标定版 + 目测评判微调, 用户指定)** =
 MATLAB `lidarCameraTform`（用户 2026-09-24 解算，**4 位有效数字**）换算到照片位姿约定：
-`R = R_matlab·Rz(−90°)`（角度 0 参考系 → 照片位姿参考系），`t = [0.0263, 0.0590, −0.0198]`。
-原始 MATLAB 矩阵与换算说明存于 `config/camera_extrinsics.yaml` 的 `matlab_source` 字段。
-注意：(1) 源内参为 MATLAB 拟合值（fx 610.75 / fy 625.63 / cx 652.81 / cy 373.98），渲染仍用
+`R = R_matlab·Rz(−90°)`，t = [0.0263, 0.0590, −0.0198]，
+再叠加 `tune_rotation_live.py` 键盘目测评判微调（目标帧 `20260923_085036` 全量数据，
+yaw 0/−0.2/−0.4 三版对比判决 **yaw=0 最优**）：**R = R_base·Ry(−0.2°)，t.z +20 mm →
+t = [0.0263, 0.0590, 0.0002]**。原始 MATLAB 矩阵与微调量存于
+`config/camera_extrinsics.yaml` 的 `matlab_source`/`tweaks` 字段。注意：(1) 源内参为
+MATLAB 拟合值（fx 610.75 / fy 625.63 / cx 652.81 / cy 373.98），渲染仍用
 `config/camera_info.yaml`（fy 611.375），两者非同一内参组；(2) 4 位有效数字引入的量化
-约 ±0.05 mm/±0.05° 量级误差。所有 `20260923_*` 的 colored.ply 与 dense_colored.ply 已用此版刷新；
-`colored_mlab.ply` 为同参数的旁路对照（photo=0 直渲，内容应与 colored.ply 等价）。
+约 ±0.05 mm/±0.05° 量级误差。微调依据拆解：**roll −0.2° 是主要贡献**（30 帧加权 RMS
+22.2→18.3 mm，逐帧稳定改善），**tz 深度云弱观测**（30 帧聚合贡献≈0，单帧四档 RMS 差
+≤1.1 mm）故按目测在 +0/+10/+20/+30mm 中判决 **+20mm 最好**。所有 `20260923_*` 的
+colored.ply 与 dense_colored.ply 已用此版刷新。
 
 **Official extrinsics (2026-09-23 Python 重解版, SUPERSEDED, archived)** = raw solve over the
 11 good `20260923_*` poses (19 captured; 070238 no board plane, 070700/070957/

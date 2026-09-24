@@ -12,16 +12,15 @@ lidar_to_camera:
   translation:
   - 0.0263
   - 0.059
-  - 0.0001999999999999988
+  - 0.010199999999999997
 tweaks:
   comment: "tune_rotation_live.py \u952E\u76D8\u76EE\u6D4B\u8BC4\u5224\u5FAE\u8C03\
     \ (2026-09-24, \u76EE\u6807\u5E27 20260923_085036 \u5168\u91CF\u6570\u636E): yaw\
-    \ 0/-0.2/-0.4 \u4E09\u7248\u5224\u51B3 yaw=0; R = R_base\xB7Ry(roll), roll=-0.2\xB0\
-    . tz \u7EC6\u626B +0/+10/+20/+30mm \u56DB\u6863, \u76EE\u6D4B +20mm \u6700\u597D\
-    \ (\u6DF1\u5EA6\u4E91\u5BF9 tz \u5F31\u89C2\u6D4B, \u4EC5\u4F9B\u53C2\u8003: \u5355\
-    \u5E27 RMS 19.4mm, 30\u5E27\u805A\u5408 tz \u8D21\u732E\u22480)."
+    \ 0/-0.2/-0.4 \u4E09\u7248\u5BF9\u6BD4\u5224\u51B3 yaw=0 \u6700\u4F18; R = R_base\xB7\
+    Ry(roll), roll=-0.2\xB0, tz=+30mm. R_base \u4E3A MATLAB lidarCameraTform \u6362\
+    \u7B97\u7248\u3002"
   roll_deg: -0.2
-  tz_mm: 20.0
+  tz_mm: 30.0
 matlab_source:
   comment: "MATLAB lidarCameraTform (2026-09-24 \u7528\u6237\u89E3\u7B97, 4\u4F4D\u6709\
     \u6548\u6570\u5B57), \u539F\u59CB\u503C\u4E3A\u89D2\u5EA60\u53C2\u8003\u7CFB;\
@@ -44,6 +43,6 @@ matlab_source:
   - 0.059
   - -0.0198
 note: "p_camera = R @ p_lidar + t (merged-frame LiDAR at photo pose). \u672C\u7248\
-  \ = MATLAB lidarCameraTform \u6362\u7B97 (\u89C1 matlab_source) + \u76EE\u6D4B\u8BC4\
-  \u5224\u5FAE\u8C03 (roll -0.2\xB0, tz +20mm); \u7248\u672C\u5386\u53F2\u4E0E\u9009\
-  \u7248\u903B\u8F91\u89C1 AGENTS.md"
+  \ = MATLAB lidarCameraTform \u6362\u7B97 (R_matlab\xB7Rz(-90\xB0), t \u89C1 matlab_source)\
+  \ + \u76EE\u6D4B\u8BC4\u5224\u5FAE\u8C03 (roll -0.2\xB0, tz +30mm, \u57FA\u51C6\
+  \ MATLAB \u7248); \u7248\u672C\u5386\u53F2\u4E0E\u9009\u7248\u903B\u8F91\u89C1 AGENTS.md"

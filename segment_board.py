@@ -43,7 +43,9 @@ REFINE_ITERS = 3                  # SVD 重拟合轮数
 REFINE_K = 2.0                    # 剔除阈值 = max(12mm, REFINE_K x 中位距离)
 REFINE_FLOOR = 0.012              # 剔除阈值下限 12mm
 REFINE_MIN_KEEP = 300             # 精修保留点数下限, 低于则停止迭代
-VERTICAL_NZ_MAX = 0.5             # 候选 |n_z| 上限: 跳过地板/天花板(板近似竖直)
+VERTICAL_NZ_MAX = 0.8             # 候选 |n_z| 上限: 跳过地板/天花板(板近似竖直);
+                                  # 0.8 放行 20~53° 俯仰标定板(弱观测方向补观测需要),
+                                  # 仍挡住 |n_z|≈1.0 水平面(桌面等), 滑窗评分+质量门兜底
 # 两段式滑窗
 WIN_CELL = 0.01                   # 滑窗占据栅格边长 1cm
 RING_CELLS = 3                    # 环带宽度 = 3 格 = 3cm(窗外紧贴一圈, 真板此处应空)

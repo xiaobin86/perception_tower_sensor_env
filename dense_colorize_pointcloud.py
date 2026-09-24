@@ -101,11 +101,13 @@ def check_bijection(pts_cam: np.ndarray, src_uv: np.ndarray, K: np.ndarray,
 
 def dense_colorize(pose_dir: str, extrinsics_path: str, camera_info_path: str,
                    photo_angle: float, dilate: bool = True, max_fill_px: float = 3.0,
-                   min_dist: float = 0.2, max_dist: float = 3.0,
+                   min_dist: float | None = None, max_dist: float | None = None,
                    output: str = "dense_colored.ply",
                    save_index_map: bool = False) -> tuple[str, int, float, dict]:
     """Build a dense RGBD cloud from merged.ply + color.png.
 
+    min_dist/max_dist 为 None 时不做距离裁剪(量程由调用方决定: GUI 传实时 Range,
+    独立运行默认不裁剪, 远点只受相机视场约束)。相机视场外的点无法溅射, 天然不进 dense。
     Returns (path, n_points, coverage, bijection_check). The check reprojects the output
     back to the image and confirms each point sits on its own source pixel exactly 1:1."""
     K, dist = load_camera_info(camera_info_path)
@@ -116,7 +118,11 @@ def dense_colorize(pose_dir: str, extrinsics_path: str, camera_info_path: str,
     points = read_ply_xyz(os.path.join(pose_dir, "merged.ply"))
 
     r = np.linalg.norm(points, axis=1)
-    keep = (r > min_dist) & (r <= max_dist)
+    keep = np.ones(len(points), dtype=bool)
+    if min_dist is not None:
+        keep &= r > min_dist
+    if max_dist is not None:
+        keep &= r <= max_dist
     points = points[keep]
 
     R_full = R @ rotation_z(photo_angle)
@@ -162,8 +168,10 @@ def main() -> int:
     parser.add_argument("--no-dilate", action="store_true", help="关闭2x2膨胀溅射")
     parser.add_argument("--max-fill-px", type=float, default=3.0,
                         help="空洞最近邻填补的像素半径上限(超出保持无效, 不虚构几何)")
-    parser.add_argument("--min-dist", type=float, default=0.2)
-    parser.add_argument("--max-dist", type=float, default=3.0)
+    parser.add_argument("--min-dist", type=float, default=None,
+                        help="距离下限(米), 默认不裁剪; 调用方应按扫描时 GUI Range 传入")
+    parser.add_argument("--max-dist", type=float, default=None,
+                        help="距离上限(米), 默认不裁剪; 调用方应按扫描时 GUI Range 传入")
     parser.add_argument("--output", default="dense_colored.ply")
     parser.add_argument("--save-index-map", action="store_true",
                         help="额外输出 <output去扩展名>_index.npy (HxW int32, 像素→PLY行号, -1=无点)")

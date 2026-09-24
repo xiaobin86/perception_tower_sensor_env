@@ -983,7 +983,7 @@ class TurntableGuiController(Node):
             dense_out, n, cov, check = dense_colorize(
                 out_dir, extrinsics, camera_info, photo_angle_deg,
                 min_dist=self._min_dist,
-                max_dist=self._max_dist if self._max_dist is not None else 3.0,
+                max_dist=self._max_dist,
                 save_index_map=True)
             verdict = "PASS" if check["ok"] else "FAIL"
             self.log(f"Dense RGBD cloud saved: {dense_out} ({n} points, coverage {cov:.1%}, "
